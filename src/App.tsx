@@ -1,11 +1,125 @@
-import EvaluateUpload from "./components/EvaluateUpload";
+import React from 'react';
+import { AppProvider, useApp } from './context/AppContext';
+import { AppLayout } from './components/Layout';
+import { Toast } from './components/ui';
 
-function App() {
+// Pages
+import LandingPage from './pages/LandingPage';
+import AuthPage from './pages/AuthPage';
+
+// Student pages
+import StudentDashboard from './pages/student/StudentDashboard';
+import CalibrationPage from './pages/student/CalibrationPage';
+import SubmitExamPage from './pages/student/SubmitExamPage';
+import ResultsPage from './pages/student/ResultsPage';
+import DisputePage from './pages/student/DisputePage';
+
+// Faculty pages
+import FacultyDashboard from './pages/faculty/FacultyDashboard';
+import CreateExamPage from './pages/faculty/CreateExamPage';
+import PendingReviewsPage from './pages/faculty/PendingReviewsPage';
+import ReviewInterfacePage from './pages/faculty/ReviewInterfacePage';
+import PublishedResultsPage from './pages/faculty/PublishedResultsPage';
+import DisputeManagementPage from './pages/faculty/DisputeManagementPage';
+
+// Admin pages
+import AdminDashboard from './pages/admin/AdminDashboard';
+import UsersPage from './pages/admin/UsersPage';
+import UsagePage from './pages/admin/UsagePage';
+import AuditLogsPage from './pages/admin/AuditLogsPage';
+import SettingsPage from './pages/admin/SettingsPage';
+import GroqSetupPage from './pages/admin/GroqSetupPage';
+
+function AutoProcessor() {
+  const { state, processEvaluation } = useApp();
+  const processed = React.useRef<Set<string>>(new Set());
+
+  React.useEffect(() => {
+    state.submissions.forEach((sub) => {
+      if (sub.status === 'SUBMITTED' && !processed.current.has(sub.id)) {
+        processed.current.add(sub.id);
+        processEvaluation(sub.id);
+      }
+    });
+  }, [state.submissions, processEvaluation]);
+
+  return null;
+}
+
+function Router() {
+  const { state, clearToast } = useApp();
+  const { page, currentUser, toast } = state;
+
+  // Public pages
+  if (page === 'landing') return <LandingPage />;
+  if (page === 'auth') return <AuthPage />;
+
+  // Redirect unauthenticated users
+  if (!currentUser) return <AuthPage />;
+
+  // Review interface is full-screen (no sidebar layout)
+  if (page === 'f-review') {
+    return (
+      <>
+        <ReviewInterfacePage />
+        {toast && <Toast message={toast.message} type={toast.type} onClose={clearToast} />}
+      </>
+    );
+  }
+
+  // All other pages use the app layout
+  const content = (() => {
+    // Student routes
+    if (currentUser.role === 'student') {
+      if (page === 's-dashboard') return <StudentDashboard />;
+      if (page === 's-calibration') return <CalibrationPage />;
+      if (page === 's-submit') return <SubmitExamPage />;
+      if (page === 's-results' || page === 's-result-detail') return <ResultsPage />;
+      if (page === 's-disputes') return <DisputePage />;
+    }
+
+    // Faculty routes
+    if (currentUser.role === 'faculty' || currentUser.role === 'admin') {
+      if (page === 'f-dashboard') return <FacultyDashboard />;
+      if (page === 'f-create-exam' || page === 'f-rubric-builder') return <CreateExamPage />;
+      if (page === 'f-reviews') return <PendingReviewsPage />;
+      if (page === 'f-results') return <PublishedResultsPage />;
+      if (page === 'f-disputes') return <DisputeManagementPage />;
+    }
+
+    // Admin routes
+    if (currentUser.role === 'admin') {
+      if (page === 'a-dashboard') return <AdminDashboard />;
+      if (page === 'a-users') return <UsersPage />;
+      if (page === 'a-usage') return <UsagePage />;
+      if (page === 'a-audit') return <AuditLogsPage />;
+      if (page === 'a-settings') return <SettingsPage />;
+      if (page === 'a-groq') return <GroqSetupPage />;
+    }
+
+    // Faculty can also view admin-ish pages
+    if (currentUser.role === 'faculty') {
+      if (page === 'a-dashboard') return <FacultyDashboard />;
+    }
+
+    // Fallback to role home
+    if (currentUser.role === 'student') return <StudentDashboard />;
+    if (currentUser.role === 'faculty') return <FacultyDashboard />;
+    return <AdminDashboard />;
+  })();
+
   return (
-    <div className="min-h-screen bg-gray-50 py-10">
-      <EvaluateUpload />
-    </div>
+    <AppLayout>
+      <AutoProcessor />
+      {content}
+    </AppLayout>
   );
 }
 
-export default App;
+export default function App() {
+  return (
+    <AppProvider>
+      <Router />
+    </AppProvider>
+  );
+}
