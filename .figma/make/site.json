@@ -1,0 +1,10 @@
+{
+  "description": "Automates transcription and rubric-based evaluation of handwritten exams with AI assistance, enabling faculty review and secure result publication for academic institutions.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}
