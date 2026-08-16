@@ -29,7 +29,7 @@ export default function EvaluateUpload() {
       });
 
       const response = await axios.post(
-        "http://localhost:5000/api/evaluate",
+        "https://evalscript-backend.onrender.com/api/evaluate",
         formData,
         {
           headers: {
@@ -84,7 +84,7 @@ export default function EvaluateUpload() {
           disabled={loading}
           className="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700 disabled:bg-gray-400"
         >
-          {loading ? "Evaluating with Grok AI..." : "Start Evaluation"}
+          {loading ? "Evaluating with Claude AI..." : "Start Evaluation"}
         </button>
       </form>
 
