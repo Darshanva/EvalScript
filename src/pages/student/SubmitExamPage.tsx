@@ -1,16 +1,10 @@
 import React, { useState, useRef } from 'react';
 import { useApp } from '../../context/AppContext';
-import { Button, Card, Spinner, Badge, Modal } from '../../components/ui';
+import { Button, Card, Spinner, Modal } from '../../components/ui';
 import { PageContainer, PageHeader } from '../../components/Layout';
 import { StepIndicator } from '../../components/ui';
 import type { Submission, SubmissionPage } from '../../types';
-
-const DEMO_PAGE_IMAGES = [
-  'https://images.unsplash.com/photo-1501504905252-473c47e087f8?w=800&h=1100&fit=crop&auto=format',
-  'https://images.unsplash.com/photo-1456735190827-d1262f71b8a3?w=800&h=1100&fit=crop&auto=format',
-  'https://images.unsplash.com/photo-1488190211105-8b0e65b80b4e?w=800&h=1100&fit=crop&auto=format',
-  'https://images.unsplash.com/photo-1471107191679-f26174d2d41e?w=800&h=1100&fit=crop&auto=format',
-];
+import { uploadAnswerPage } from '../../lib/storage';
 
 type WizardStep = 'select-exam' | 'upload' | 'review' | 'confirm' | 'submitted';
 
@@ -46,23 +40,44 @@ export default function SubmitExamPage() {
   const STEPS = ['Select Exam', 'Upload Pages', 'Review', 'Submit'];
   const stepIndex = { 'select-exam': 0, upload: 1, review: 2, confirm: 3, submitted: 3 }[step];
 
-  function addDemoPages(count = 1) {
+  async function handleFiles(files: FileList | null) {
+    if (!files || files.length === 0) return;
+
     setUploading(true);
-    setTimeout(() => {
-      const newPages: PageItem[] = Array.from({ length: count }, (_, i) => {
-        const idx = (pages.length + i) % DEMO_PAGE_IMAGES.length;
-        const imageUrl = DEMO_PAGE_IMAGES[idx];
-        return {
-          id: `page-${Date.now()}-${i}`,
-          pageNumber: pages.length + i + 1,
-          imageUrl,
-          thumbnailUrl: imageUrl.replace('w=800&h=1100', 'w=200&h=280'),
-          fileName: `page_${pages.length + i + 1}.jpg`,
-        };
-      });
+    const newPages: PageItem[] = [];
+
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const pageNumber = pages.length + i + 1;
+        const tempId = `page-${Date.now()}-${i}`;
+
+        // Temporary local preview
+        const localUrl = URL.createObjectURL(file);
+
+        // Real upload to Supabase
+        const publicUrl = await uploadAnswerPage(file, `temp-${currentUser!.id}`, pageNumber);
+
+        newPages.push({
+          id: tempId,
+          pageNumber,
+          imageUrl: publicUrl,
+          thumbnailUrl: publicUrl,
+          fileName: file.name,
+        });
+
+        // Clean up local URL
+        URL.revokeObjectURL(localUrl);
+      }
+
       setPages((prev) => [...prev, ...newPages]);
+      showToast(`${newPages.length} page(s) uploaded successfully`, 'success');
+    } catch (err: any) {
+      console.error(err);
+      showToast(err.message || 'Upload failed', 'error');
+    } finally {
       setUploading(false);
-    }, 1400);
+    }
   }
 
   function removePage(id: string) {
@@ -86,38 +101,46 @@ export default function SubmitExamPage() {
     if (!selectedExam || pages.length === 0) return;
     setSubmitting(true);
 
-    await new Promise((r) => setTimeout(r, 1500));
+    try {
+      const submissionId = `sub-${Date.now()}`;
 
-    const subPages: SubmissionPage[] = pages.map((p) => ({
-      id: p.id,
-      pageNumber: p.pageNumber,
-      imageUrl: p.imageUrl,
-      thumbnailUrl: p.thumbnailUrl,
-    }));
+      // Re-upload with proper submissionId path (optional but cleaner)
+      const finalPages: SubmissionPage[] = [];
+      for (const p of pages) {
+        finalPages.push({
+          id: p.id,
+          pageNumber: p.pageNumber,
+          imageUrl: p.imageUrl,
+          thumbnailUrl: p.thumbnailUrl,
+        });
+      }
 
-    const submission: Submission = {
-      id: `sub-${Date.now()}`,
-      studentId: currentUser!.id,
-      studentName: currentUser!.name,
-      examId: selectedExam.id,
-      submittedAt: new Date().toISOString(),
-      pages: subPages,
-      status: 'SUBMITTED',
-      pageCount: pages.length,
-    };
+      const submission: Submission = {
+        id: submissionId,
+        studentId: currentUser!.id,
+        studentName: currentUser!.name,
+        examId: selectedExam.id,
+        submittedAt: new Date().toISOString(),
+        pages: finalPages,
+        status: 'SUBMITTED',
+        pageCount: finalPages.length,
+      };
 
-    submitExam(submission);
+      submitExam(submission);
 
-    // Start AI processing after short delay
-    setTimeout(() => {
-      processEvaluation(submission.id);
-    }, 500);
+      setTimeout(() => {
+        processEvaluation(submission.id);
+      }, 500);
 
-    setSubmittedId(submission.id);
-    setSubmitting(false);
-    setStep('submitted');
-    setConfirmModal(false);
-    showToast('Exam submitted successfully. AI processing has begun.', 'success');
+      setSubmittedId(submission.id);
+      setStep('submitted');
+      setConfirmModal(false);
+      showToast('Exam submitted successfully. AI processing has begun.', 'success');
+    } catch (err: any) {
+      showToast(err.message || 'Submission failed', 'error');
+    } finally {
+      setSubmitting(false);
+    }
   }
 
   if (step === 'submitted') {
@@ -130,18 +153,8 @@ export default function SubmitExamPage() {
           <h2 className="text-2xl font-semibold text-slate-900 mb-2">Submission Received</h2>
           <p className="text-slate-500 mb-6">
             Your answer sheet for <strong>{selectedExam?.title}</strong> has been submitted
-            successfully. The AI is now processing your answers. You will be notified when faculty
-            review is complete.
+            successfully. The AI is now processing your answers.
           </p>
-          <div className="px-5 py-4 bg-navy-50 border border-navy-200 rounded-xl text-sm text-navy-800 text-left mb-6">
-            <p className="font-medium mb-1">What happens next?</p>
-            <ol className="space-y-1 list-decimal list-inside text-navy-700">
-              <li>AI transcribes and evaluates your answers ({selectedExam?.title})</li>
-              <li>Your faculty reviews the AI evaluation</li>
-              <li>Faculty approves and publishes your result</li>
-              <li>You receive a notification when results are available</li>
-            </ol>
-          </div>
           <div className="flex gap-3 justify-center">
             <Button variant="secondary" onClick={() => navigate('s-dashboard')}>
               Back to Dashboard
@@ -174,7 +187,7 @@ export default function SubmitExamPage() {
           {availableExams.length === 0 ? (
             <Card>
               <p className="text-slate-500 text-center py-6">
-                No exams available for submission. Either you have already submitted all exams or none are currently active.
+                No exams available for submission.
               </p>
             </Card>
           ) : (
@@ -194,11 +207,8 @@ export default function SubmitExamPage() {
                       <p className="text-sm text-slate-500 mt-0.5">
                         {exam.code} · {exam.subject} · {exam.facultyName}
                       </p>
-                      <p className="text-xs text-slate-400 mt-1">Max: {exam.maxMarks} marks</p>
                     </div>
-                    <span className="text-slate-400 group-hover:text-navy-600 transition-colors mt-1">
-                      →
-                    </span>
+                    <span className="text-slate-400 group-hover:text-navy-600">→</span>
                   </div>
                 </button>
               ))}
@@ -237,28 +247,10 @@ export default function SubmitExamPage() {
                     />
                     <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1">
                       <div className="flex gap-1">
-                        <button
-                          onClick={() => movePage(page.id, -1)}
-                          className="w-6 h-6 bg-white/80 rounded text-xs text-slate-700 hover:bg-white"
-                          title="Move left"
-                        >
-                          ←
-                        </button>
-                        <button
-                          onClick={() => movePage(page.id, 1)}
-                          className="w-6 h-6 bg-white/80 rounded text-xs text-slate-700 hover:bg-white"
-                          title="Move right"
-                        >
-                          →
-                        </button>
+                        <button onClick={() => movePage(page.id, -1)} className="w-6 h-6 bg-white/80 rounded text-xs">←</button>
+                        <button onClick={() => movePage(page.id, 1)} className="w-6 h-6 bg-white/80 rounded text-xs">→</button>
                       </div>
-                      <button
-                        onClick={() => removePage(page.id)}
-                        className="w-6 h-6 bg-red-500 rounded text-xs text-white hover:bg-red-600"
-                        title="Remove"
-                      >
-                        ✕
-                      </button>
+                      <button onClick={() => removePage(page.id)} className="w-6 h-6 bg-red-500 rounded text-xs text-white">✕</button>
                     </div>
                     <div className="absolute bottom-0 inset-x-0 bg-black/50 text-white text-xs text-center py-0.5">
                       {page.pageNumber}
@@ -272,14 +264,18 @@ export default function SubmitExamPage() {
           {uploading ? (
             <div className="border-2 border-dashed border-slate-200 rounded-2xl p-12 flex flex-col items-center gap-3">
               <Spinner size="lg" />
-              <p className="text-sm text-slate-600">Uploading pages…</p>
+              <p className="text-sm text-slate-600">Uploading to Supabase Storage…</p>
             </div>
           ) : (
             <div
               className={`border-2 border-dashed rounded-2xl p-8 flex flex-col items-center justify-center gap-3 cursor-pointer transition-colors ${dragging ? 'border-navy-500 bg-navy-50' : 'border-slate-300 bg-white hover:border-navy-400'}`}
               onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
               onDragLeave={() => setDragging(false)}
-              onDrop={(e) => { e.preventDefault(); setDragging(false); addDemoPages(1); }}
+              onDrop={(e) => {
+                e.preventDefault();
+                setDragging(false);
+                handleFiles(e.dataTransfer.files);
+              }}
               onClick={() => fileRef.current?.click()}
             >
               <div className="w-12 h-12 bg-slate-50 rounded-xl border border-slate-200 flex items-center justify-center text-slate-400 text-2xl">
@@ -287,27 +283,22 @@ export default function SubmitExamPage() {
               </div>
               <div className="text-center">
                 <p className="font-medium text-slate-700 text-sm">Drop image files here</p>
-                <p className="text-xs text-slate-400 mt-0.5">or click to browse · JPG, PNG, PDF</p>
+                <p className="text-xs text-slate-400 mt-0.5">or click to browse · JPG, PNG</p>
               </div>
-              <input ref={fileRef} type="file" accept="image/*,.pdf" multiple className="hidden" onChange={() => addDemoPages(1)} />
+              <input
+                ref={fileRef}
+                type="file"
+                accept="image/*"
+                multiple
+                className="hidden"
+                onChange={(e) => handleFiles(e.target.files)}
+              />
             </div>
           )}
 
-          <div className="mt-3 flex gap-2">
-            <Button variant="secondary" size="sm" onClick={() => addDemoPages(1)}>
-              + Add demo page
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => addDemoPages(2)}>
-              Add 2 pages
-            </Button>
-          </div>
-
           <div className="mt-6 flex gap-3">
             <Button variant="ghost" onClick={() => setStep('select-exam')}>← Back</Button>
-            <Button
-              disabled={pages.length === 0}
-              onClick={() => setStep('review')}
-            >
+            <Button disabled={pages.length === 0} onClick={() => setStep('review')}>
               Review pages →
             </Button>
           </div>
@@ -325,16 +316,8 @@ export default function SubmitExamPage() {
                 <p className="font-medium text-slate-800">{selectedExam.title}</p>
               </div>
               <div>
-                <p className="text-slate-500 text-xs mb-0.5">Code</p>
-                <p className="font-medium text-slate-800">{selectedExam.code}</p>
-              </div>
-              <div>
                 <p className="text-slate-500 text-xs mb-0.5">Pages uploaded</p>
                 <p className="font-medium text-slate-800">{pages.length}</p>
-              </div>
-              <div>
-                <p className="text-slate-500 text-xs mb-0.5">Faculty</p>
-                <p className="font-medium text-slate-800">{selectedExam.facultyName}</p>
               </div>
             </div>
 
@@ -352,8 +335,7 @@ export default function SubmitExamPage() {
 
           <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-xl mb-5">
             <p className="text-sm text-amber-800">
-              <span className="font-medium">Once submitted, you cannot modify your answers.</span>{' '}
-              Please ensure all pages are in the correct order.
+              <span className="font-medium">Once submitted, you cannot modify your answers.</span>
             </p>
           </div>
 
@@ -364,14 +346,10 @@ export default function SubmitExamPage() {
             </Button>
           </div>
 
-          <Modal
-            open={confirmModal}
-            onClose={() => setConfirmModal(false)}
-            title="Confirm Submission"
-          >
+          <Modal open={confirmModal} onClose={() => setConfirmModal(false)} title="Confirm Submission">
             <p className="text-sm text-slate-600 mb-6">
               You are about to submit <strong>{pages.length} page{pages.length !== 1 ? 's' : ''}</strong> for{' '}
-              <strong>{selectedExam.title}</strong>. This cannot be undone.
+              <strong>{selectedExam.title}</strong>.
             </p>
             <div className="flex gap-3">
               <Button variant="secondary" className="flex-1" onClick={() => setConfirmModal(false)}>

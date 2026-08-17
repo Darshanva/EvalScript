@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useReducer, useCallback, type ReactNode } from 'react';
+import React, { createContext, useContext, useReducer, useCallback, useEffect, type ReactNode } from 'react';
 import type {
   User,
   Exam,
@@ -99,7 +99,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         submissions: state.submissions.map((s) =>
-          s.id === action.submissionId ? { ...s, evaluationId: action.evaluationId } : s
+          s.id === action.submissionId ? { ...s, status: action.status } : s
         ),
       };
     case 'ADD_EVALUATION':
@@ -171,16 +171,27 @@ function getRoleHome(user: User): PageRoute {
   return 'a-dashboard';
 }
 
+// ---------- localStorage helpers ----------
+function loadFromStorage<T>(key: string, fallback: T): T {
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) return JSON.parse(raw) as T;
+  } catch (e) {
+    console.warn('Failed to load from localStorage', key, e);
+  }
+  return fallback;
+}
+
 const initialState: AppState = {
   currentUser: null,
   page: 'landing',
   navCtx: {},
   users: DEMO_USERS,
-  exams: DEMO_EXAMS,
-  rubrics: DEMO_RUBRICS,
-  submissions: DEMO_SUBMISSIONS,
-  evaluations: DEMO_EVALUATIONS,
-  calibrations: DEMO_CALIBRATIONS,
+  exams: loadFromStorage('evalscript_exams', DEMO_EXAMS),
+  rubrics: loadFromStorage('evalscript_rubrics', DEMO_RUBRICS),
+  submissions: loadFromStorage('evalscript_submissions', DEMO_SUBMISSIONS),
+  evaluations: loadFromStorage('evalscript_evaluations', DEMO_EVALUATIONS),
+  calibrations: loadFromStorage('evalscript_calibrations', DEMO_CALIBRATIONS),
   auditLogs: DEMO_AUDIT_LOGS,
   aiUsage: DEMO_AI_USAGE,
   systemSettings: DEFAULT_SYSTEM_SETTINGS,
@@ -221,6 +232,19 @@ const AppContext = createContext<AppContextValue | null>(null);
 
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialState);
+
+  // ---------- Persist important data ----------
+  useEffect(() => {
+  try {
+    localStorage.setItem('evalscript_submissions', JSON.stringify(state.submissions));
+    localStorage.setItem('evalscript_evaluations', JSON.stringify(state.evaluations));
+    localStorage.setItem('evalscript_calibrations', JSON.stringify(state.calibrations));
+    localStorage.setItem('evalscript_exams', JSON.stringify(state.exams));
+    localStorage.setItem('evalscript_rubrics', JSON.stringify(state.rubrics));
+  } catch (e) {
+    console.warn('Failed to save to localStorage', e);
+  }
+}, [state.submissions, state.evaluations, state.calibrations, state.exams, state.rubrics]);
 
   const navigate = useCallback((page: PageRoute, navCtx?: NavigationContext) => {
     dispatch({ type: 'NAVIGATE', page, navCtx });
