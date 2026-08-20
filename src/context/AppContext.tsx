@@ -1,4 +1,11 @@
-import React, { createContext, useContext, useReducer, useCallback, useEffect, type ReactNode } from 'react';
+import React, {
+  createContext,
+  useContext,
+  useReducer,
+  useCallback,
+  useEffect,
+  type ReactNode,
+} from 'react';
 import type {
   User,
   Exam,
@@ -88,7 +95,13 @@ function appReducer(state: AppState, action: AppAction): AppState {
     case 'LOGIN_ERROR':
       return { ...state, loginError: action.message, authLoading: false };
     case 'LOGOUT':
-      return { ...state, currentUser: null, page: 'landing', navCtx: {}, authLoading: false };
+      return {
+        ...state,
+        currentUser: null,
+        page: 'landing',
+        navCtx: {},
+        authLoading: false,
+      };
     case 'SET_AUTH_LOADING':
       return { ...state, authLoading: action.loading };
     case 'NAVIGATE':
@@ -195,9 +208,9 @@ function loadFromStorage<T>(key: string, fallback: T): T {
 }
 
 const initialState: AppState = {
-  currentUser: null,
-  page: 'landing',
-  navCtx: {},
+  currentUser: loadFromStorage<User | null>('evalscript_currentUser', null),
+  page: loadFromStorage<PageRoute>('evalscript_page', 'landing'),
+  navCtx: loadFromStorage<NavigationContext>('evalscript_navCtx', {}),
   users: DEMO_USERS,
   exams: loadFromStorage('evalscript_exams', DEMO_EXAMS),
   rubrics: loadFromStorage('evalscript_rubrics', DEMO_RUBRICS),
@@ -256,6 +269,7 @@ const AppContext = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialState);
 
+  // Persist important state so refresh keeps the user on the same page
   useEffect(() => {
     try {
       localStorage.setItem('evalscript_submissions', JSON.stringify(state.submissions));
@@ -263,10 +277,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
       localStorage.setItem('evalscript_calibrations', JSON.stringify(state.calibrations));
       localStorage.setItem('evalscript_exams', JSON.stringify(state.exams));
       localStorage.setItem('evalscript_rubrics', JSON.stringify(state.rubrics));
+      localStorage.setItem('evalscript_page', JSON.stringify(state.page));
+      localStorage.setItem('evalscript_navCtx', JSON.stringify(state.navCtx));
+      localStorage.setItem('evalscript_currentUser', JSON.stringify(state.currentUser));
     } catch (e) {
       console.warn('Failed to save to localStorage', e);
     }
-  }, [state.submissions, state.evaluations, state.calibrations, state.exams, state.rubrics]);
+  }, [
+    state.submissions,
+    state.evaluations,
+    state.calibrations,
+    state.exams,
+    state.rubrics,
+    state.page,
+    state.navCtx,
+    state.currentUser,
+  ]);
 
   const navigate = useCallback((page: PageRoute, navCtx?: NavigationContext) => {
     dispatch({ type: 'NAVIGATE', page, navCtx });
@@ -344,6 +370,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const logout = useCallback(() => {
+    localStorage.removeItem('evalscript_currentUser');
+    localStorage.removeItem('evalscript_page');
+    localStorage.removeItem('evalscript_navCtx');
     dispatch({ type: 'LOGOUT' });
   }, []);
 

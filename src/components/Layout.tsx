@@ -57,7 +57,6 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <div className="flex min-h-screen bg-slate-50">
-      {/* Mobile overlay */}
       {sidebarOpen && (
         <div
           className="fixed inset-0 z-30 bg-black/30 lg:hidden"
@@ -65,11 +64,11 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         />
       )}
 
-      {/* Sidebar */}
       <aside
-        className={`fixed top-0 left-0 z-40 h-screen w-60 bg-navy-950 flex flex-col transition-transform duration-200 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}
+        className={`fixed top-0 left-0 z-40 h-screen w-60 bg-navy-950 flex flex-col transition-transform duration-200 lg:translate-x-0 ${
+          sidebarOpen ? 'translate-x-0' : '-translate-x-full'
+        }`}
       >
-        {/* Logo */}
         <div className="px-5 py-5 border-b border-white/10">
           <div className="flex items-center gap-2.5">
             <div className="w-8 h-8 bg-gold-500 rounded-lg flex items-center justify-center text-white font-bold text-sm">
@@ -82,7 +81,6 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           </div>
         </div>
 
-        {/* Navigation */}
         <nav className="flex-1 px-3 py-4 overflow-y-auto">
           <ul className="space-y-0.5">
             {navItems.map((item) => {
@@ -94,13 +92,15 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                       navigate(item.key);
                       setSidebarOpen(false);
                     }}
-                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${isActive ? 'bg-white/10 text-white' : 'text-white/60 hover:text-white hover:bg-white/5'}`}
+                    className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
+                      isActive
+                        ? 'bg-white/10 text-white'
+                        : 'text-white/60 hover:text-white hover:bg-white/5'
+                    }`}
                   >
                     <span className="text-base w-5 text-center shrink-0">{item.icon}</span>
                     {item.label}
-                    {item.key === 'f-reviews' && (
-                      <PendingBadge />
-                    )}
+                    {item.key === 'f-reviews' && <PendingBadge />}
                   </button>
                 </li>
               );
@@ -108,7 +108,6 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           </ul>
         </nav>
 
-        {/* User profile */}
         <div className="px-3 py-4 border-t border-white/10">
           <div className="flex items-center gap-3 px-2 py-2">
             <Avatar initials={currentUser.avatarInitials} size="sm" color="gold" />
@@ -126,9 +125,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
 
-      {/* Main content */}
       <div className="flex-1 flex flex-col lg:ml-60">
-        {/* Top bar */}
         <header className="h-14 bg-white border-b border-slate-200 flex items-center px-4 lg:px-6 gap-4 sticky top-0 z-20">
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
@@ -146,14 +143,10 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
           </div>
         </header>
 
-        {/* Page content */}
         <main className="flex-1 overflow-auto">{children}</main>
       </div>
 
-      {/* Toast */}
-      {toast && (
-        <Toast message={toast.message} type={toast.type} onClose={clearToast} />
-      )}
+      {toast && <Toast message={toast.message} type={toast.type} onClose={clearToast} />}
     </div>
   );
 }
@@ -168,8 +161,6 @@ function PendingBadge() {
     </span>
   );
 }
-
-// ── Page container helpers ───────────────────────────────────────────────────
 
 export function PageContainer({
   children,
@@ -186,22 +177,50 @@ export function PageHeader({
   subtitle,
   breadcrumb,
   action,
+  showBack = true,
+  backTo,
 }: {
   title: string;
   subtitle?: string;
   breadcrumb?: string;
   action?: React.ReactNode;
+  showBack?: boolean;
+  backTo?: PageRoute;
 }) {
+  const { navigate, state } = useApp();
+
+  function handleBack() {
+    if (backTo) {
+      navigate(backTo);
+      return;
+    }
+    if (state.currentUser?.role === 'student') navigate('s-dashboard');
+    else if (state.currentUser?.role === 'faculty') navigate('f-dashboard');
+    else if (state.currentUser?.role === 'admin') navigate('a-dashboard');
+    else navigate('landing');
+  }
+
   return (
     <div className="flex items-start justify-between gap-4 mb-8">
-      <div>
-        {breadcrumb && (
-          <p className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-1">
-            {breadcrumb}
-          </p>
+      <div className="flex items-start gap-3">
+        {showBack && state.currentUser && (
+          <button
+            onClick={handleBack}
+            className="mt-1 w-9 h-9 flex items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition-colors shrink-0"
+            title="Go back"
+          >
+            ←
+          </button>
         )}
-        <h1 className="text-2xl font-semibold text-slate-900">{title}</h1>
-        {subtitle && <p className="text-sm text-slate-500 mt-1">{subtitle}</p>}
+        <div>
+          {breadcrumb && (
+            <p className="text-xs font-medium text-slate-400 uppercase tracking-wide mb-1">
+              {breadcrumb}
+            </p>
+          )}
+          <h1 className="text-2xl font-semibold text-slate-900">{title}</h1>
+          {subtitle && <p className="text-sm text-slate-500 mt-1">{subtitle}</p>}
+        </div>
       </div>
       {action}
     </div>
