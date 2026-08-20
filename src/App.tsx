@@ -1,20 +1,17 @@
 import React from 'react';
 import { AppProvider, useApp } from './context/AppContext';
 import { AppLayout } from './components/Layout';
-import { Toast } from './components/ui';
+import { Toast, Spinner } from './components/ui';
 
-// Pages
 import LandingPage from './pages/LandingPage';
 import AuthPage from './pages/AuthPage';
 
-// Student pages
 import StudentDashboard from './pages/student/StudentDashboard';
 import CalibrationPage from './pages/student/CalibrationPage';
 import SubmitExamPage from './pages/student/SubmitExamPage';
 import ResultsPage from './pages/student/ResultsPage';
 import DisputePage from './pages/student/DisputePage';
 
-// Faculty pages
 import FacultyDashboard from './pages/faculty/FacultyDashboard';
 import CreateExamPage from './pages/faculty/CreateExamPage';
 import PendingReviewsPage from './pages/faculty/PendingReviewsPage';
@@ -22,7 +19,6 @@ import ReviewInterfacePage from './pages/faculty/ReviewInterfacePage';
 import PublishedResultsPage from './pages/faculty/PublishedResultsPage';
 import DisputeManagementPage from './pages/faculty/DisputeManagementPage';
 
-// Admin pages
 import AdminDashboard from './pages/admin/AdminDashboard';
 import UsersPage from './pages/admin/UsersPage';
 import UsagePage from './pages/admin/UsagePage';
@@ -48,16 +44,25 @@ function AutoProcessor() {
 
 function Router() {
   const { state, clearToast } = useApp();
-  const { page, currentUser, toast } = state;
+  const { page, currentUser, toast, authLoading } = state;
 
-  // Public pages
+  // Show loading while restoring session
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="flex flex-col items-center gap-3">
+          <Spinner size="lg" />
+          <p className="text-sm text-slate-500">Loading...</p>
+        </div>
+      </div>
+    );
+  }
+
   if (page === 'landing') return <LandingPage />;
   if (page === 'auth') return <AuthPage />;
 
-  // Redirect unauthenticated users
   if (!currentUser) return <AuthPage />;
 
-  // Review interface is full-screen (no sidebar layout)
   if (page === 'f-review') {
     return (
       <>
@@ -67,9 +72,7 @@ function Router() {
     );
   }
 
-  // All other pages use the app layout
   const content = (() => {
-    // Student routes
     if (currentUser.role === 'student') {
       if (page === 's-dashboard') return <StudentDashboard />;
       if (page === 's-calibration') return <CalibrationPage />;
@@ -78,7 +81,6 @@ function Router() {
       if (page === 's-disputes') return <DisputePage />;
     }
 
-    // Faculty routes
     if (currentUser.role === 'faculty' || currentUser.role === 'admin') {
       if (page === 'f-dashboard') return <FacultyDashboard />;
       if (page === 'f-create-exam' || page === 'f-rubric-builder') return <CreateExamPage />;
@@ -87,7 +89,6 @@ function Router() {
       if (page === 'f-disputes') return <DisputeManagementPage />;
     }
 
-    // Admin routes
     if (currentUser.role === 'admin') {
       if (page === 'a-dashboard') return <AdminDashboard />;
       if (page === 'a-users') return <UsersPage />;
@@ -97,12 +98,10 @@ function Router() {
       if (page === 'a-groq') return <GroqSetupPage />;
     }
 
-    // Faculty can also view admin-ish pages
     if (currentUser.role === 'faculty') {
       if (page === 'a-dashboard') return <FacultyDashboard />;
     }
 
-    // Fallback to role home
     if (currentUser.role === 'student') return <StudentDashboard />;
     if (currentUser.role === 'faculty') return <FacultyDashboard />;
     return <AdminDashboard />;
