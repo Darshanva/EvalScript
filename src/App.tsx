@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AppProvider, useApp } from './context/AppContext';
 import { AppLayout } from './components/Layout';
 import { Toast, Spinner } from './components/ui';
@@ -30,7 +31,7 @@ function AutoProcessor() {
   const { state, processEvaluation } = useApp();
   const processed = React.useRef<Set<string>>(new Set());
 
-  React.useEffect(() => {
+  useEffect(() => {
     state.submissions.forEach((sub) => {
       if (sub.status === 'SUBMITTED' && !processed.current.has(sub.id)) {
         processed.current.add(sub.id);
@@ -42,11 +43,36 @@ function AutoProcessor() {
   return null;
 }
 
-function Router() {
-  const { state, clearToast } = useApp();
-  const { page, currentUser, toast, authLoading } = state;
+function ProtectedRoute({
+  children,
+  roles,
+}: {
+  children: React.ReactNode;
+  roles?: string[];
+}) {
+  const { state } = useApp();
 
-  // Show loading while restoring session
+  if (state.authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (!state.currentUser) return <Navigate to="/login" replace />;
+
+  if (roles && !roles.includes(state.currentUser.role)) {
+    return <Navigate to="/" replace />;
+  }
+
+  return <>{children}</>;
+}
+
+function AppRoutes() {
+  const { state, clearToast } = useApp();
+  const { currentUser, toast, authLoading } = state;
+
   if (authLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
@@ -58,71 +84,220 @@ function Router() {
     );
   }
 
-  // Not logged in → only Landing or Auth
-  if (!currentUser) {
-    if (page === 'auth') return <AuthPage />;
-    return <LandingPage />;
-  }
-
-  // Faculty review (full screen, no layout)
-  if (page === 'f-review') {
-    return (
-      <>
-        <ReviewInterfacePage />
-        {toast && (
-          <Toast message={toast.message} type={toast.type} onClose={clearToast} />
-        )}
-      </>
-    );
-  }
-
-  const content = (() => {
-    if (currentUser.role === 'student') {
-      if (page === 's-dashboard') return <StudentDashboard />;
-      if (page === 's-calibration') return <CalibrationPage />;
-      if (page === 's-submit') return <SubmitExamPage />;
-      if (page === 's-results' || page === 's-result-detail') return <ResultsPage />;
-      if (page === 's-disputes') return <DisputePage />;
-    }
-
-    if (currentUser.role === 'faculty' || currentUser.role === 'admin') {
-      if (page === 'f-dashboard') return <FacultyDashboard />;
-      if (page === 'f-create-exam' || page === 'f-rubric-builder') return <CreateExamPage />;
-      if (page === 'f-reviews') return <PendingReviewsPage />;
-      if (page === 'f-results') return <PublishedResultsPage />;
-      if (page === 'f-disputes') return <DisputeManagementPage />;
-    }
-
-    if (currentUser.role === 'admin') {
-      if (page === 'a-dashboard') return <AdminDashboard />;
-      if (page === 'a-users') return <UsersPage />;
-      if (page === 'a-usage') return <UsagePage />;
-      if (page === 'a-audit') return <AuditLogsPage />;
-      if (page === 'a-settings') return <SettingsPage />;
-      if (page === 'a-groq') return <GroqSetupPage />;
-    }
-
-    // Fallbacks
-    if (currentUser.role === 'student') return <StudentDashboard />;
-    if (currentUser.role === 'faculty') return <FacultyDashboard />;
-    return <AdminDashboard />;
-  })();
+  const home =
+    currentUser?.role === 'student'
+      ? '/student'
+      : currentUser?.role === 'faculty'
+        ? '/faculty'
+        : currentUser?.role === 'admin'
+          ? '/admin'
+          : '/';
 
   return (
-    <AppLayout>
-      <AutoProcessor />
-      {content}
-      {toast && (
-        <Toast message={toast.message} type={toast.type} onClose={clearToast} />
-      )}
-    </AppLayout>
+    <>
+      <Routes>
+        <Route
+          path="/"
+          element={!currentUser ? <LandingPage /> : <Navigate to={home} replace />}
+        />
+        <Route
+          path="/login"
+          element={!currentUser ? <AuthPage /> : <Navigate to={home} replace />}
+        />
+        <Route
+          path="/auth"
+          element={!currentUser ? <AuthPage /> : <Navigate to={home} replace />}
+        />
+
+        {/* Student */}
+        <Route
+          path="/student"
+          element={
+            <ProtectedRoute roles={['student']}>
+              <AppLayout>
+                <StudentDashboard />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/student/calibration"
+          element={
+            <ProtectedRoute roles={['student']}>
+              <AppLayout>
+                <CalibrationPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/student/submit"
+          element={
+            <ProtectedRoute roles={['student']}>
+              <AppLayout>
+                <SubmitExamPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/student/results"
+          element={
+            <ProtectedRoute roles={['student']}>
+              <AppLayout>
+                <ResultsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/student/disputes"
+          element={
+            <ProtectedRoute roles={['student']}>
+              <AppLayout>
+                <DisputePage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Faculty */}
+        <Route
+          path="/faculty"
+          element={
+            <ProtectedRoute roles={['faculty', 'admin']}>
+              <AppLayout>
+                <FacultyDashboard />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/faculty/create-exam"
+          element={
+            <ProtectedRoute roles={['faculty', 'admin']}>
+              <AppLayout>
+                <CreateExamPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/faculty/reviews"
+          element={
+            <ProtectedRoute roles={['faculty', 'admin']}>
+              <AppLayout>
+                <PendingReviewsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/faculty/review"
+          element={
+            <ProtectedRoute roles={['faculty', 'admin']}>
+              <ReviewInterfacePage />
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/faculty/results"
+          element={
+            <ProtectedRoute roles={['faculty', 'admin']}>
+              <AppLayout>
+                <PublishedResultsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/faculty/disputes"
+          element={
+            <ProtectedRoute roles={['faculty', 'admin']}>
+              <AppLayout>
+                <DisputeManagementPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Admin */}
+        <Route
+          path="/admin"
+          element={
+            <ProtectedRoute roles={['admin']}>
+              <AppLayout>
+                <AdminDashboard />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/users"
+          element={
+            <ProtectedRoute roles={['admin']}>
+              <AppLayout>
+                <UsersPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/usage"
+          element={
+            <ProtectedRoute roles={['admin']}>
+              <AppLayout>
+                <UsagePage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/audit"
+          element={
+            <ProtectedRoute roles={['admin']}>
+              <AppLayout>
+                <AuditLogsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/settings"
+          element={
+            <ProtectedRoute roles={['admin']}>
+              <AppLayout>
+                <SettingsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/groq"
+          element={
+            <ProtectedRoute roles={['admin']}>
+              <AppLayout>
+                <GroqSetupPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+
+      {currentUser && <AutoProcessor />}
+      {toast && <Toast message={toast.message} type={toast.type} onClose={clearToast} />}
+    </>
   );
 }
 
 export default function App() {
   return (
-    <AppProvider>
-      <Router />
-    </AppProvider>
+    <BrowserRouter>
+      <AppProvider>
+        <AppRoutes />
+      </AppProvider>
+    </BrowserRouter>
   );
 }

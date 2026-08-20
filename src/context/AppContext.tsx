@@ -22,8 +22,6 @@ import type {
   ResultVersion,
 } from '../types';
 import {
-  DEMO_USERS,
-  DEMO_CREDENTIALS,
   DEMO_EXAMS,
   DEMO_RUBRICS,
   DEMO_SUBMISSIONS,
@@ -34,6 +32,17 @@ import {
   DEFAULT_SYSTEM_SETTINGS,
 } from '../lib/seed-data';
 import { runDemoEvaluation } from '../lib/demo-ai';
+import { supabase } from '../lib/supabase';
+import {
+  fetchProfile,
+  fetchSubmissions,
+  fetchEvaluations,
+  fetchExams,
+  saveSubmission,
+  updateSubmissionStatus,
+  saveEvaluation,
+  saveExam,
+} from '../lib/db';
 
 interface AppState {
   currentUser: User | null;
@@ -60,6 +69,7 @@ type AppAction =
   | { type: 'LOGIN_ERROR'; message: string }
   | { type: 'LOGOUT' }
   | { type: 'SET_AUTH_LOADING'; loading: boolean }
+  | { type: 'SET_DATA'; payload: Partial<AppState> }
   | { type: 'NAVIGATE'; page: PageRoute; navCtx?: NavigationContext }
   | { type: 'SHOW_TOAST'; message: string; toastType: 'success' | 'error' | 'info' }
   | { type: 'CLEAR_TOAST' }
@@ -85,25 +95,15 @@ type AppAction =
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'LOGIN_SUCCESS':
-      return {
-        ...state,
-        currentUser: action.user,
-        loginError: null,
-        authLoading: false,
-        page: getRoleHome(action.user),
-      };
+      return { ...state, currentUser: action.user, loginError: null, authLoading: false };
     case 'LOGIN_ERROR':
       return { ...state, loginError: action.message, authLoading: false };
     case 'LOGOUT':
-      return {
-        ...state,
-        currentUser: null,
-        page: 'landing',
-        navCtx: {},
-        authLoading: false,
-      };
+      return { ...state, currentUser: null, authLoading: false };
     case 'SET_AUTH_LOADING':
       return { ...state, authLoading: action.loading };
+    case 'SET_DATA':
+      return { ...state, ...action.payload };
     case 'NAVIGATE':
       return { ...state, page: action.page, navCtx: action.navCtx ?? state.navCtx };
     case 'SHOW_TOAST':
@@ -161,9 +161,6 @@ function appReducer(state: AppState, action: AppAction): AppState {
     case 'UPDATE_USER_CALIBRATED':
       return {
         ...state,
-        users: state.users.map((u) =>
-          u.id === action.userId ? { ...u, calibrated: true } : u
-        ),
         currentUser:
           state.currentUser?.id === action.userId
             ? { ...state.currentUser, calibrated: true }
@@ -191,36 +188,16 @@ function appReducer(state: AppState, action: AppAction): AppState {
   }
 }
 
-function getRoleHome(user: User): PageRoute {
-  if (user.role === 'student') return 's-dashboard';
-  if (user.role === 'faculty') return 'f-dashboard';
-  return 'a-dashboard';
-}
-
-function loadFromStorage<T>(key: string, fallback: T): T {
-  try {
-    const raw = localStorage.getItem(key);
-    if (raw) return JSON.parse(raw) as T;
-  } catch (e) {
-    console.warn('Failed to load from localStorage', key, e);
-  }
-  return fallback;
-}
-
-// Merge saved credentials into DEMO_CREDENTIALS on load
-const savedCredentials = loadFromStorage<Record<string, string>>('evalscript_credentials', {});
-Object.assign(DEMO_CREDENTIALS, savedCredentials);
-
 const initialState: AppState = {
-  currentUser: loadFromStorage<User | null>('evalscript_currentUser', null),
-  page: loadFromStorage<PageRoute>('evalscript_page', 'landing'),
-  navCtx: loadFromStorage<NavigationContext>('evalscript_navCtx', {}),
-  users: loadFromStorage('evalscript_users', DEMO_USERS),
-  exams: loadFromStorage('evalscript_exams', DEMO_EXAMS),
-  rubrics: loadFromStorage('evalscript_rubrics', DEMO_RUBRICS),
-  submissions: loadFromStorage('evalscript_submissions', DEMO_SUBMISSIONS),
-  evaluations: loadFromStorage('evalscript_evaluations', DEMO_EVALUATIONS),
-  calibrations: loadFromStorage('evalscript_calibrations', DEMO_CALIBRATIONS),
+  currentUser: null,
+  page: 'landing',
+  navCtx: {},
+  users: [],
+  exams: DEMO_EXAMS,
+  rubrics: DEMO_RUBRICS,
+  submissions: [],
+  evaluations: [],
+  calibrations: DEMO_CALIBRATIONS,
   auditLogs: DEMO_AUDIT_LOGS,
   aiUsage: DEMO_AI_USAGE,
   systemSettings: DEFAULT_SYSTEM_SETTINGS,
@@ -228,27 +205,21 @@ const initialState: AppState = {
   resultVersions: [],
   toast: null,
   loginError: null,
-  authLoading: false,
+  authLoading: true,
 };
 
 interface AppContextValue {
   state: AppState;
   navigate: (page: PageRoute, navCtx?: NavigationContext) => void;
-  login: (email: string, password: string) => boolean;
-  register: (data: {
-    name: string;
-    email: string;
-    password: string;
-    role: 'student' | 'faculty';
-  }) => { success: boolean; message: string };
-  logout: () => void;
+  setAuthUser: (user: User | null) => void;
+  logout: () => Promise<void>;
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   clearToast: () => void;
-  submitExam: (submission: Submission) => void;
+  submitExam: (submission: Submission) => Promise<void>;
   processEvaluation: (submissionId: string) => void;
-  updateEvaluation: (evaluation: Evaluation) => void;
-  publishEvaluation: (evaluationId: string, facultyNotes?: string) => void;
-  createExam: (exam: Exam) => void;
+  updateEvaluation: (evaluation: Evaluation) => Promise<void>;
+  publishEvaluation: (evaluationId: string, facultyNotes?: string) => Promise<void>;
+  createExam: (exam: Exam) => Promise<void>;
   createRubric: (rubric: Rubric) => void;
   updateRubric: (rubric: Rubric) => void;
   addCalibration: (calibration: CalibrationSample) => void;
@@ -273,128 +244,83 @@ const AppContext = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialState);
 
+  // Supabase Auth session listener
   useEffect(() => {
-    try {
-      localStorage.setItem('evalscript_submissions', JSON.stringify(state.submissions));
-      localStorage.setItem('evalscript_evaluations', JSON.stringify(state.evaluations));
-      localStorage.setItem('evalscript_calibrations', JSON.stringify(state.calibrations));
-      localStorage.setItem('evalscript_exams', JSON.stringify(state.exams));
-      localStorage.setItem('evalscript_rubrics', JSON.stringify(state.rubrics));
-      localStorage.setItem('evalscript_users', JSON.stringify(state.users));
-      localStorage.setItem('evalscript_page', JSON.stringify(state.page));
-      localStorage.setItem('evalscript_navCtx', JSON.stringify(state.navCtx));
-      localStorage.setItem('evalscript_currentUser', JSON.stringify(state.currentUser));
-    } catch (e) {
-      console.warn('Failed to save to localStorage', e);
+    let mounted = true;
+
+    async function init() {
+      dispatch({ type: 'SET_AUTH_LOADING', loading: true });
+
+      const { data: { session } } = await supabase.auth.getSession();
+
+      if (session?.user && mounted) {
+        const profile = await fetchProfile(session.user.id);
+        if (profile) {
+          dispatch({ type: 'LOGIN_SUCCESS', user: profile });
+          // Load cloud data
+          const [subs, evals, exams] = await Promise.all([
+            fetchSubmissions(),
+            fetchEvaluations(),
+            fetchExams(),
+          ]);
+          dispatch({
+            type: 'SET_DATA',
+            payload: {
+              submissions: subs.length ? subs : DEMO_SUBMISSIONS,
+              evaluations: evals.length ? evals : DEMO_EVALUATIONS,
+              exams: exams.length ? exams : DEMO_EXAMS,
+            },
+          });
+        }
+      }
+
+      if (mounted) dispatch({ type: 'SET_AUTH_LOADING', loading: false });
     }
-  }, [
-    state.submissions,
-    state.evaluations,
-    state.calibrations,
-    state.exams,
-    state.rubrics,
-    state.users,
-    state.page,
-    state.navCtx,
-    state.currentUser,
-  ]);
+
+    init();
+
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if (event === 'SIGNED_IN' && session?.user) {
+        const profile = await fetchProfile(session.user.id);
+        if (profile) {
+          dispatch({ type: 'LOGIN_SUCCESS', user: profile });
+          const [subs, evals, exams] = await Promise.all([
+            fetchSubmissions(),
+            fetchEvaluations(),
+            fetchExams(),
+          ]);
+          dispatch({
+            type: 'SET_DATA',
+            payload: {
+              submissions: subs.length ? subs : DEMO_SUBMISSIONS,
+              evaluations: evals.length ? evals : DEMO_EVALUATIONS,
+              exams: exams.length ? exams : DEMO_EXAMS,
+            },
+          });
+        }
+      }
+      if (event === 'SIGNED_OUT') {
+        dispatch({ type: 'LOGOUT' });
+      }
+    });
+
+    return () => {
+      mounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
 
   const navigate = useCallback((page: PageRoute, navCtx?: NavigationContext) => {
     dispatch({ type: 'NAVIGATE', page, navCtx });
   }, []);
 
-  const login = useCallback(
-    (email: string, password: string): boolean => {
-      const emailKey = email.trim();
-      const emailLower = emailKey.toLowerCase();
+  const setAuthUser = useCallback((user: User | null) => {
+    if (user) dispatch({ type: 'LOGIN_SUCCESS', user });
+    else dispatch({ type: 'LOGOUT' });
+  }, []);
 
-      const expectedPassword =
-        DEMO_CREDENTIALS[emailKey] ||
-        DEMO_CREDENTIALS[emailLower] ||
-        loadFromStorage<Record<string, string>>('evalscript_credentials', {})[emailKey] ||
-        loadFromStorage<Record<string, string>>('evalscript_credentials', {})[emailLower];
-
-      if (!expectedPassword || expectedPassword !== password) {
-        dispatch({ type: 'LOGIN_ERROR', message: 'Invalid email or password.' });
-        return false;
-      }
-
-      const user =
-        state.users.find(
-          (u) => u.email === emailKey || u.email.toLowerCase() === emailLower
-        ) ||
-        DEMO_USERS.find(
-          (u) => u.email === emailKey || u.email.toLowerCase() === emailLower
-        );
-
-      if (!user) {
-        dispatch({ type: 'LOGIN_ERROR', message: 'User not found.' });
-        return false;
-      }
-
-      dispatch({ type: 'LOGIN_SUCCESS', user });
-      return true;
-    },
-    [state.users]
-  );
-
-  const register = useCallback(
-    (data: {
-      name: string;
-      email: string;
-      password: string;
-      role: 'student' | 'faculty';
-    }): { success: boolean; message: string } => {
-      const emailKey = data.email.trim();
-      const emailLower = emailKey.toLowerCase();
-
-      // Check if already exists
-      const existsInUsers = state.users.some(
-        (u) => u.email === emailKey || u.email.toLowerCase() === emailLower
-      );
-      const existsInDemo = DEMO_USERS.some(
-        (u) => u.email === emailKey || u.email.toLowerCase() === emailLower
-      );
-      const existingCreds = loadFromStorage<Record<string, string>>('evalscript_credentials', {});
-
-      if (existsInUsers || existsInDemo || existingCreds[emailKey] || existingCreds[emailLower]) {
-        return { success: false, message: 'Email already registered. Please sign in.' };
-      }
-
-      const initials = data.name
-        .split(' ')
-        .filter(Boolean)
-        .map((w) => w[0])
-        .join('')
-        .toUpperCase()
-        .slice(0, 2);
-
-      const newUser: User = {
-        id: `user-${Date.now()}`,
-        name: data.name.trim(),
-        email: emailKey,
-        role: data.role,
-        avatarInitials: initials || 'U',
-        calibrated: false,
-      };
-
-      // Save password
-      DEMO_CREDENTIALS[emailKey] = data.password;
-      const updatedCreds = { ...existingCreds, [emailKey]: data.password };
-      localStorage.setItem('evalscript_credentials', JSON.stringify(updatedCreds));
-
-      dispatch({ type: 'ADD_USER', user: newUser });
-      dispatch({ type: 'LOGIN_SUCCESS', user: newUser });
-
-      return { success: true, message: 'Account created successfully!' };
-    },
-    [state.users]
-  );
-
-  const logout = useCallback(() => {
-    localStorage.removeItem('evalscript_currentUser');
-    localStorage.removeItem('evalscript_page');
-    localStorage.removeItem('evalscript_navCtx');
+  const logout = useCallback(async () => {
+    await supabase.auth.signOut();
     dispatch({ type: 'LOGOUT' });
   }, []);
 
@@ -420,8 +346,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const submitExam = useCallback(
-    (submission: Submission) => {
+    async (submission: Submission) => {
       dispatch({ type: 'ADD_SUBMISSION', submission });
+      try {
+        await saveSubmission(submission);
+      } catch (e) {
+        console.error('Failed to save submission to cloud', e);
+      }
       if (state.currentUser) {
         addAuditLog({
           userId: state.currentUser.id,
@@ -444,69 +375,52 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
       const exam = state.exams.find((e) => e.id === submission.examId);
       const rubric = state.rubrics.find((r) => r.examId === submission.examId);
-      const student = state.users.find((u) => u.id === submission.studentId);
-      if (!exam || !rubric || !student) return;
+      if (!exam || !rubric) return;
 
-      dispatch({
-        type: 'UPDATE_SUBMISSION_STATUS',
-        submissionId,
-        status: 'PROCESSING',
-      });
+      dispatch({ type: 'UPDATE_SUBMISSION_STATUS', submissionId, status: 'PROCESSING' });
+      updateSubmissionStatus(submissionId, 'PROCESSING').catch(console.error);
 
-      setTimeout(() => {
+      setTimeout(async () => {
         const evaluation = runDemoEvaluation({
           submission,
           rubric,
           examTitle: `${exam.title} (${exam.code})`,
-          studentName: student.name,
+          studentName: submission.studentName || 'Student',
         });
 
         dispatch({ type: 'ADD_EVALUATION', evaluation });
-        dispatch({
-          type: 'UPDATE_SUBMISSION_STATUS',
-          submissionId,
-          status: 'AI_COMPLETE',
-        });
+        dispatch({ type: 'UPDATE_SUBMISSION_STATUS', submissionId, status: 'AI_COMPLETE' });
         dispatch({
           type: 'UPDATE_SUBMISSION_EVALUATION_ID',
           submissionId,
           evaluationId: evaluation.id,
         });
 
-        addAuditLog({
-          userId: 'system',
-          userName: 'AI System',
-          userRole: 'admin',
-          action: 'AI_EVALUATION_COMPLETE',
-          entity: 'evaluation',
-          entityId: evaluation.id,
-          details: `AI evaluation complete for ${student.name}. Score: ${evaluation.totalMarks}/${evaluation.maxMarks}.`,
-        });
+        try {
+          await saveEvaluation(evaluation);
+          await updateSubmissionStatus(submissionId, 'AI_COMPLETE', evaluation.id);
+        } catch (e) {
+          console.error(e);
+        }
       }, 2500);
     },
-    [state.submissions, state.exams, state.rubrics, state.users, addAuditLog]
+    [state.submissions, state.exams, state.rubrics]
   );
 
   const updateEvaluation = useCallback(
-    (evaluation: Evaluation) => {
+    async (evaluation: Evaluation) => {
       dispatch({ type: 'UPDATE_EVALUATION', evaluation });
-      if (state.currentUser) {
-        addAuditLog({
-          userId: state.currentUser.id,
-          userName: state.currentUser.name,
-          userRole: state.currentUser.role,
-          action: 'EVALUATION_UPDATED',
-          entity: 'evaluation',
-          entityId: evaluation.id,
-          details: `Evaluation updated. Faculty marks: ${evaluation.facultyTotalMarks ?? evaluation.totalMarks}/${evaluation.maxMarks}.`,
-        });
+      try {
+        await saveEvaluation(evaluation);
+      } catch (e) {
+        console.error(e);
       }
     },
-    [state.currentUser, addAuditLog]
+    []
   );
 
   const publishEvaluation = useCallback(
-    (evaluationId: string, facultyNotes?: string) => {
+    async (evaluationId: string, facultyNotes?: string) => {
       const evaluation = state.evaluations.find((e) => e.id === evaluationId);
       if (!evaluation || !state.currentUser) return;
 
@@ -527,35 +441,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
         status: 'PUBLISHED',
       });
 
-      addAuditLog({
-        userId: state.currentUser.id,
-        userName: state.currentUser.name,
-        userRole: state.currentUser.role,
-        action: 'RESULT_PUBLISHED',
-        entity: 'evaluation',
-        entityId: evaluationId,
-        details: `Result published for ${evaluation.studentName}. Final score: ${evaluation.facultyTotalMarks ?? evaluation.totalMarks}/${evaluation.maxMarks}.`,
-      });
+      try {
+        await saveEvaluation(updatedEval);
+        await updateSubmissionStatus(evaluation.submissionId, 'PUBLISHED');
+      } catch (e) {
+        console.error(e);
+      }
     },
-    [state.evaluations, state.currentUser, addAuditLog]
+    [state.evaluations, state.currentUser]
   );
 
   const createExam = useCallback(
-    (exam: Exam) => {
+    async (exam: Exam) => {
       dispatch({ type: 'ADD_EXAM', exam });
-      if (state.currentUser) {
-        addAuditLog({
-          userId: state.currentUser.id,
-          userName: state.currentUser.name,
-          userRole: state.currentUser.role,
-          action: 'EXAM_CREATED',
-          entity: 'exam',
-          entityId: exam.id,
-          details: `Exam "${exam.title}" (${exam.code}) created.`,
-        });
+      try {
+        await saveExam(exam);
+      } catch (e) {
+        console.error(e);
       }
     },
-    [state.currentUser, addAuditLog]
+    []
   );
 
   const createRubric = useCallback((rubric: Rubric) => {
@@ -566,24 +471,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'UPDATE_RUBRIC', rubric });
   }, []);
 
-  const addCalibration = useCallback(
-    (calibration: CalibrationSample) => {
-      dispatch({ type: 'ADD_CALIBRATION', calibration });
-      dispatch({ type: 'UPDATE_USER_CALIBRATED', userId: calibration.studentId });
-      if (state.currentUser) {
-        addAuditLog({
-          userId: state.currentUser.id,
-          userName: state.currentUser.name,
-          userRole: state.currentUser.role,
-          action: 'CALIBRATION_UPLOADED',
-          entity: 'calibration',
-          entityId: calibration.id,
-          details: 'Student uploaded handwriting calibration sample.',
-        });
-      }
-    },
-    [state.currentUser, addAuditLog]
-  );
+  const addCalibration = useCallback((calibration: CalibrationSample) => {
+    dispatch({ type: 'ADD_CALIBRATION', calibration });
+    dispatch({ type: 'UPDATE_USER_CALIBRATED', userId: calibration.studentId });
+  }, []);
 
   const updateSystemSettings = useCallback((settings: SystemSettings) => {
     dispatch({ type: 'UPDATE_SYSTEM_SETTINGS', settings });
@@ -592,7 +483,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const getExamsForCurrentUser = useCallback((): Exam[] => {
     if (!state.currentUser) return [];
     if (state.currentUser.role === 'student') {
-      return state.exams.filter((e) => e.studentIds.includes(state.currentUser!.id));
+      return state.exams.filter((e) => e.studentIds?.includes(state.currentUser!.id));
     }
     if (state.currentUser.role === 'faculty') {
       return state.exams.filter((e) => e.facultyId === state.currentUser!.id);
@@ -658,19 +549,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         status: 'OPEN',
       };
       dispatch({ type: 'ADD_DISPUTE', dispute });
-      if (state.currentUser) {
-        addAuditLog({
-          userId: state.currentUser.id,
-          userName: state.currentUser.name,
-          userRole: state.currentUser.role,
-          action: 'DISPUTE_SUBMITTED',
-          entity: 'dispute',
-          entityId: dispute.id,
-          details: `Dispute submitted for evaluation ${dispute.evaluationId}`,
-        });
-      }
     },
-    [state.currentUser, addAuditLog]
+    []
   );
 
   const resolveDispute = useCallback(
@@ -686,25 +566,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
         facultyName: state.currentUser.name,
       };
       dispatch({ type: 'UPDATE_DISPUTE', dispute: updated });
-      addAuditLog({
-        userId: state.currentUser.id,
-        userName: state.currentUser.name,
-        userRole: state.currentUser.role,
-        action: 'DISPUTE_RESOLVED',
-        entity: 'dispute',
-        entityId: disputeId,
-        details: `Dispute ${status}`,
-      });
     },
-    [state.disputes, state.currentUser, addAuditLog]
+    [state.disputes, state.currentUser]
   );
 
   const createResultVersion = useCallback(
-    (
-      evaluationId: string,
-      reason: string,
-      questionChanges: ResultVersion['questionChanges']
-    ) => {
+    (evaluationId: string, reason: string, questionChanges: ResultVersion['questionChanges']) => {
       if (!state.currentUser) return;
       const existing = state.resultVersions.filter((v) => v.evaluationId === evaluationId);
       const evaluation = state.evaluations.find((e) => e.id === evaluationId);
@@ -722,17 +589,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         questionChanges,
       };
       dispatch({ type: 'ADD_RESULT_VERSION', version });
-      addAuditLog({
-        userId: state.currentUser.id,
-        userName: state.currentUser.name,
-        userRole: state.currentUser.role,
-        action: 'RESULT_VERSION_CREATED',
-        entity: 'evaluation',
-        entityId: evaluationId,
-        details: `New result version created (v${version.version}): ${reason}`,
-      });
     },
-    [state.currentUser, state.resultVersions, state.evaluations, addAuditLog]
+    [state.currentUser, state.resultVersions, state.evaluations]
   );
 
   return (
@@ -740,8 +598,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       value={{
         state,
         navigate,
-        login,
-        register,
+        setAuthUser,
         logout,
         showToast,
         clearToast,

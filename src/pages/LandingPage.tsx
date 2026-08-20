@@ -1,4 +1,5 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
 import { Button } from '../components/ui';
 
@@ -73,7 +74,7 @@ const STATS = [
 ];
 
 export default function LandingPage() {
-  const { navigate } = useApp();
+  const navigate = useNavigate();
 
   return (
     <div className="min-h-screen bg-white">
@@ -87,10 +88,10 @@ export default function LandingPage() {
             <span className="font-semibold text-navy-900 text-lg">EvalScript</span>
           </div>
           <div className="flex items-center gap-3">
-            <Button variant="ghost" size="sm" onClick={() => navigate('auth')}>
+            <Button variant="ghost" size="sm" onClick={() => navigate('/login')}>
               Sign in
             </Button>
-            <Button variant="primary" size="sm" onClick={() => navigate('auth')}>
+            <Button variant="primary" size="sm" onClick={() => navigate('/login')}>
               Get Started
             </Button>
           </div>
@@ -127,7 +128,7 @@ export default function LandingPage() {
               faculty in control. Every result reviewed by a human before students see it.
             </p>
             <div className="flex flex-wrap gap-3">
-              <Button size="lg" variant="gold" onClick={() => navigate('auth')}>
+              <Button size="lg" variant="gold" onClick={() => navigate('/login')}>
                 Get Started
               </Button>
               <Button
@@ -291,10 +292,10 @@ export default function LandingPage() {
             Create an account and start evaluating handwritten exams with AI assistance.
           </p>
           <div className="flex items-center justify-center gap-3 flex-wrap">
-            <Button size="lg" onClick={() => navigate('auth')}>
+            <Button size="lg" onClick={() => navigate('/login')}>
               Get Started
             </Button>
-            <Button size="lg" variant="outline" onClick={() => navigate('auth')}>
+            <Button size="lg" variant="outline" onClick={() => navigate('/login')}>
               Sign In
             </Button>
           </div>

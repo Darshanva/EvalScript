@@ -1,37 +1,37 @@
 import React, { useState } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
 import { Avatar, Toast } from './ui';
-import type { PageRoute } from '../types';
 
 interface NavItem {
-  key: PageRoute;
+  path: string;
   label: string;
   icon: string;
 }
 
 const STUDENT_NAV: NavItem[] = [
-  { key: 's-dashboard', label: 'Dashboard', icon: '⊞' },
-  { key: 's-calibration', label: 'Calibration', icon: '✎' },
-  { key: 's-submit', label: 'Submit Exam', icon: '↑' },
-  { key: 's-results', label: 'My Results', icon: '◉' },
-  { key: 's-disputes', label: 'Disputes', icon: '⚡' },
+  { path: '/student', label: 'Dashboard', icon: '⊞' },
+  { path: '/student/calibration', label: 'Calibration', icon: '✎' },
+  { path: '/student/submit', label: 'Submit Exam', icon: '↑' },
+  { path: '/student/results', label: 'My Results', icon: '◉' },
+  { path: '/student/disputes', label: 'Disputes', icon: '⚡' },
 ];
 
 const FACULTY_NAV: NavItem[] = [
-  { key: 'f-dashboard', label: 'Dashboard', icon: '⊞' },
-  { key: 'f-create-exam', label: 'Create Exam', icon: '+' },
-  { key: 'f-reviews', label: 'Pending Reviews', icon: '◎' },
-  { key: 'f-results', label: 'Published Results', icon: '◉' },
-  { key: 'f-disputes', label: 'Disputes', icon: '⚡' },
+  { path: '/faculty', label: 'Dashboard', icon: '⊞' },
+  { path: '/faculty/create-exam', label: 'Create Exam', icon: '+' },
+  { path: '/faculty/reviews', label: 'Pending Reviews', icon: '◎' },
+  { path: '/faculty/results', label: 'Published Results', icon: '◉' },
+  { path: '/faculty/disputes', label: 'Disputes', icon: '⚡' },
 ];
 
 const ADMIN_NAV: NavItem[] = [
-  { key: 'a-dashboard', label: 'Dashboard', icon: '⊞' },
-  { key: 'a-users', label: 'Users', icon: '⋯' },
-  { key: 'a-usage', label: 'AI Usage', icon: '≋' },
-  { key: 'a-audit', label: 'Audit Logs', icon: '☰' },
-  { key: 'a-groq', label: 'Groq Setup', icon: '⚡' },
-  { key: 'a-settings', label: 'Settings', icon: '⚙' },
+  { path: '/admin', label: 'Dashboard', icon: '⊞' },
+  { path: '/admin/users', label: 'Users', icon: '⋯' },
+  { path: '/admin/usage', label: 'AI Usage', icon: '≋' },
+  { path: '/admin/audit', label: 'Audit Logs', icon: '☰' },
+  { path: '/admin/groq', label: 'Groq Setup', icon: '⚡' },
+  { path: '/admin/settings', label: 'Settings', icon: '⚙' },
 ];
 
 function getNavItems(role: string): NavItem[] {
@@ -46,9 +46,17 @@ function getRoleLabel(role: string): string {
   return 'Admin Console';
 }
 
+function getRoleHome(role: string): string {
+  if (role === 'student') return '/student';
+  if (role === 'faculty') return '/faculty';
+  return '/admin';
+}
+
 export function AppLayout({ children }: { children: React.ReactNode }) {
-  const { state, navigate, logout, clearToast } = useApp();
-  const { currentUser, page, toast } = state;
+  const { state, logout, clearToast } = useApp();
+  const { currentUser, toast } = state;
+  const navigate = useNavigate();
+  const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
 
   if (!currentUser) return null;
@@ -84,12 +92,12 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
         <nav className="flex-1 px-3 py-4 overflow-y-auto">
           <ul className="space-y-0.5">
             {navItems.map((item) => {
-              const isActive = page === item.key;
+              const isActive = location.pathname === item.path;
               return (
-                <li key={item.key}>
+                <li key={item.path}>
                   <button
                     onClick={() => {
-                      navigate(item.key);
+                      navigate(item.path);
                       setSidebarOpen(false);
                     }}
                     className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-all ${
@@ -100,7 +108,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
                   >
                     <span className="text-base w-5 text-center shrink-0">{item.icon}</span>
                     {item.label}
-                    {item.key === 'f-reviews' && <PendingBadge />}
+                    {item.path === '/faculty/reviews' && <PendingBadge />}
                   </button>
                 </li>
               );
@@ -117,7 +125,7 @@ export function AppLayout({ children }: { children: React.ReactNode }) {
             </div>
           </div>
           <button
-            onClick={logout}
+            onClick={() => logout()}
             className="mt-2 w-full flex items-center gap-2 px-3 py-2 rounded-lg text-white/50 hover:text-white/80 hover:bg-white/5 text-xs transition-colors"
           >
             <span>⎋</span> Sign out
@@ -185,19 +193,21 @@ export function PageHeader({
   breadcrumb?: string;
   action?: React.ReactNode;
   showBack?: boolean;
-  backTo?: PageRoute;
+  backTo?: string;
 }) {
-  const { navigate, state } = useApp();
+  const { state } = useApp();
+  const navigate = useNavigate();
 
   function handleBack() {
     if (backTo) {
       navigate(backTo);
       return;
     }
-    if (state.currentUser?.role === 'student') navigate('s-dashboard');
-    else if (state.currentUser?.role === 'faculty') navigate('f-dashboard');
-    else if (state.currentUser?.role === 'admin') navigate('a-dashboard');
-    else navigate('landing');
+    if (state.currentUser) {
+      navigate(getRoleHome(state.currentUser.role));
+    } else {
+      navigate('/');
+    }
   }
 
   return (
