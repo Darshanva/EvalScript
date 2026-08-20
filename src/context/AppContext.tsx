@@ -45,12 +45,14 @@ interface AppState {
   resultVersions: ResultVersion[];
   toast: { message: string; type: 'success' | 'error' | 'info' } | null;
   loginError: string | null;
+  authLoading: boolean;
 }
 
 type AppAction =
   | { type: 'LOGIN_SUCCESS'; user: User }
   | { type: 'LOGIN_ERROR'; message: string }
   | { type: 'LOGOUT' }
+  | { type: 'SET_AUTH_LOADING'; loading: boolean }
   | { type: 'NAVIGATE'; page: PageRoute; navCtx?: NavigationContext }
   | { type: 'SHOW_TOAST'; message: string; toastType: 'success' | 'error' | 'info' }
   | { type: 'CLEAR_TOAST' }
@@ -76,11 +78,19 @@ type AppAction =
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'LOGIN_SUCCESS':
-      return { ...state, currentUser: action.user, loginError: null, page: getRoleHome(action.user) };
+      return {
+        ...state,
+        currentUser: action.user,
+        loginError: null,
+        authLoading: false,
+        page: getRoleHome(action.user),
+      };
     case 'LOGIN_ERROR':
-      return { ...state, loginError: action.message };
+      return { ...state, loginError: action.message, authLoading: false };
     case 'LOGOUT':
-      return { ...state, currentUser: null, page: 'landing', navCtx: {} };
+      return { ...state, currentUser: null, page: 'landing', navCtx: {}, authLoading: false };
+    case 'SET_AUTH_LOADING':
+      return { ...state, authLoading: action.loading };
     case 'NAVIGATE':
       return { ...state, page: action.page, navCtx: action.navCtx ?? state.navCtx };
     case 'SHOW_TOAST':
@@ -100,7 +110,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         submissions: state.submissions.map((s) =>
-          s.id === action.submissionId ? { ...s, status: action.status } : s
+          s.id === action.submissionId ? { ...s, evaluationId: action.evaluationId } : s
         ),
       };
     case 'ADD_EVALUATION':
@@ -201,6 +211,7 @@ const initialState: AppState = {
   resultVersions: [],
   toast: null,
   loginError: null,
+  authLoading: false,
 };
 
 interface AppContextValue {
@@ -228,7 +239,11 @@ interface AppContextValue {
   updateSystemSettings: (settings: SystemSettings) => void;
   submitDispute: (dispute: Omit<DisputeRequest, 'id' | 'createdAt' | 'status'>) => void;
   resolveDispute: (disputeId: string, resolution: string, status: 'RESOLVED' | 'REJECTED') => void;
-  createResultVersion: (evaluationId: string, reason: string, questionChanges: ResultVersion['questionChanges']) => void;
+  createResultVersion: (
+    evaluationId: string,
+    reason: string,
+    questionChanges: ResultVersion['questionChanges']
+  ) => void;
   getExamsForCurrentUser: () => Exam[];
   getSubmissionsForCurrentUser: () => Submission[];
   getEvaluationsForCurrentUser: () => Evaluation[];
@@ -407,20 +422,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
           evaluationId: evaluation.id,
         });
 
-        if (state.currentUser) {
-          addAuditLog({
-            userId: 'system',
-            userName: 'AI System',
-            userRole: 'admin',
-            action: 'AI_EVALUATION_COMPLETE',
-            entity: 'evaluation',
-            entityId: evaluation.id,
-            details: `Demo AI evaluation complete for ${student.name}. Score: ${evaluation.totalMarks}/${evaluation.maxMarks}.`,
-          });
-        }
+        addAuditLog({
+          userId: 'system',
+          userName: 'AI System',
+          userRole: 'admin',
+          action: 'AI_EVALUATION_COMPLETE',
+          entity: 'evaluation',
+          entityId: evaluation.id,
+          details: `AI evaluation complete for ${student.name}. Score: ${evaluation.totalMarks}/${evaluation.maxMarks}.`,
+        });
       }, 2500);
     },
-    [state.submissions, state.exams, state.rubrics, state.users, state.currentUser, addAuditLog]
+    [state.submissions, state.exams, state.rubrics, state.users, addAuditLog]
   );
 
   const updateEvaluation = useCallback(
@@ -602,7 +615,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           action: 'DISPUTE_SUBMITTED',
           entity: 'dispute',
           entityId: dispute.id,
-          details: `Dispute submitted for evaluation ${dispute.evaluationId}: "${dispute.reason.slice(0, 80)}"`,
+          details: `Dispute submitted for evaluation ${dispute.evaluationId}`,
         });
       }
     },
@@ -629,7 +642,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         action: 'DISPUTE_RESOLVED',
         entity: 'dispute',
         entityId: disputeId,
-        details: `Dispute ${status}: "${resolution.slice(0, 80)}"`,
+        details: `Dispute ${status}`,
       });
     },
     [state.disputes, state.currentUser, addAuditLog]
