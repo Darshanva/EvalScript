@@ -58,16 +58,20 @@ function Router() {
     );
   }
 
-  if (page === 'landing') return <LandingPage />;
-  if (page === 'auth') return <AuthPage />;
+  // Not logged in → only Landing or Auth
+  if (!currentUser) {
+    if (page === 'auth') return <AuthPage />;
+    return <LandingPage />;
+  }
 
-  if (!currentUser) return <AuthPage />;
-
+  // Faculty review (full screen, no layout)
   if (page === 'f-review') {
     return (
       <>
         <ReviewInterfacePage />
-        {toast && <Toast message={toast.message} type={toast.type} onClose={clearToast} />}
+        {toast && (
+          <Toast message={toast.message} type={toast.type} onClose={clearToast} />
+        )}
       </>
     );
   }
@@ -98,10 +102,7 @@ function Router() {
       if (page === 'a-groq') return <GroqSetupPage />;
     }
 
-    if (currentUser.role === 'faculty') {
-      if (page === 'a-dashboard') return <FacultyDashboard />;
-    }
-
+    // Fallbacks
     if (currentUser.role === 'student') return <StudentDashboard />;
     if (currentUser.role === 'faculty') return <FacultyDashboard />;
     return <AdminDashboard />;
@@ -111,6 +112,9 @@ function Router() {
     <AppLayout>
       <AutoProcessor />
       {content}
+      {toast && (
+        <Toast message={toast.message} type={toast.type} onClose={clearToast} />
+      )}
     </AppLayout>
   );
 }
