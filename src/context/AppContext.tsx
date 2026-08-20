@@ -207,11 +207,15 @@ function loadFromStorage<T>(key: string, fallback: T): T {
   return fallback;
 }
 
+// Merge saved credentials into DEMO_CREDENTIALS on load
+const savedCredentials = loadFromStorage<Record<string, string>>('evalscript_credentials', {});
+Object.assign(DEMO_CREDENTIALS, savedCredentials);
+
 const initialState: AppState = {
   currentUser: loadFromStorage<User | null>('evalscript_currentUser', null),
   page: loadFromStorage<PageRoute>('evalscript_page', 'landing'),
   navCtx: loadFromStorage<NavigationContext>('evalscript_navCtx', {}),
-  users: DEMO_USERS,
+  users: loadFromStorage('evalscript_users', DEMO_USERS),
   exams: loadFromStorage('evalscript_exams', DEMO_EXAMS),
   rubrics: loadFromStorage('evalscript_rubrics', DEMO_RUBRICS),
   submissions: loadFromStorage('evalscript_submissions', DEMO_SUBMISSIONS),
@@ -269,7 +273,6 @@ const AppContext = createContext<AppContextValue | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialState);
 
-  // Persist important state so refresh keeps the user on the same page
   useEffect(() => {
     try {
       localStorage.setItem('evalscript_submissions', JSON.stringify(state.submissions));
@@ -277,6 +280,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       localStorage.setItem('evalscript_calibrations', JSON.stringify(state.calibrations));
       localStorage.setItem('evalscript_exams', JSON.stringify(state.exams));
       localStorage.setItem('evalscript_rubrics', JSON.stringify(state.rubrics));
+      localStorage.setItem('evalscript_users', JSON.stringify(state.users));
       localStorage.setItem('evalscript_page', JSON.stringify(state.page));
       localStorage.setItem('evalscript_navCtx', JSON.stringify(state.navCtx));
       localStorage.setItem('evalscript_currentUser', JSON.stringify(state.currentUser));
@@ -289,6 +293,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     state.calibrations,
     state.exams,
     state.rubrics,
+    state.users,
     state.page,
     state.navCtx,
     state.currentUser,
@@ -300,23 +305,33 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(
     (email: string, password: string): boolean => {
+      const emailKey = email.trim();
+      const emailLower = emailKey.toLowerCase();
+
       const expectedPassword =
-        DEMO_CREDENTIALS[email] || DEMO_CREDENTIALS[email.toLowerCase()];
+        DEMO_CREDENTIALS[emailKey] ||
+        DEMO_CREDENTIALS[emailLower] ||
+        loadFromStorage<Record<string, string>>('evalscript_credentials', {})[emailKey] ||
+        loadFromStorage<Record<string, string>>('evalscript_credentials', {})[emailLower];
+
       if (!expectedPassword || expectedPassword !== password) {
         dispatch({ type: 'LOGIN_ERROR', message: 'Invalid email or password.' });
         return false;
       }
+
       const user =
-        DEMO_USERS.find(
-          (u) => u.email === email || u.email.toLowerCase() === email.toLowerCase()
-        ) ||
         state.users.find(
-          (u) => u.email === email || u.email.toLowerCase() === email.toLowerCase()
+          (u) => u.email === emailKey || u.email.toLowerCase() === emailLower
+        ) ||
+        DEMO_USERS.find(
+          (u) => u.email === emailKey || u.email.toLowerCase() === emailLower
         );
+
       if (!user) {
         dispatch({ type: 'LOGIN_ERROR', message: 'User not found.' });
         return false;
       }
+
       dispatch({ type: 'LOGIN_SUCCESS', user });
       return true;
     },
@@ -330,15 +345,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
       password: string;
       role: 'student' | 'faculty';
     }): { success: boolean; message: string } => {
-      const emailLower = data.email.trim().toLowerCase();
+      const emailKey = data.email.trim();
+      const emailLower = emailKey.toLowerCase();
 
-      const existsInDemo = DEMO_USERS.some((u) => u.email.toLowerCase() === emailLower);
-      if (existsInDemo || DEMO_CREDENTIALS[data.email] || DEMO_CREDENTIALS[emailLower]) {
-        return { success: false, message: 'Email already registered. Please sign in.' };
-      }
+      // Check if already exists
+      const existsInUsers = state.users.some(
+        (u) => u.email === emailKey || u.email.toLowerCase() === emailLower
+      );
+      const existsInDemo = DEMO_USERS.some(
+        (u) => u.email === emailKey || u.email.toLowerCase() === emailLower
+      );
+      const existingCreds = loadFromStorage<Record<string, string>>('evalscript_credentials', {});
 
-      const existsInState = state.users.some((u) => u.email.toLowerCase() === emailLower);
-      if (existsInState) {
+      if (existsInUsers || existsInDemo || existingCreds[emailKey] || existingCreds[emailLower]) {
         return { success: false, message: 'Email already registered. Please sign in.' };
       }
 
@@ -353,13 +372,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       const newUser: User = {
         id: `user-${Date.now()}`,
         name: data.name.trim(),
-        email: data.email.trim(),
+        email: emailKey,
         role: data.role,
         avatarInitials: initials || 'U',
         calibrated: false,
       };
 
-      DEMO_CREDENTIALS[data.email.trim()] = data.password;
+      // Save password
+      DEMO_CREDENTIALS[emailKey] = data.password;
+      const updatedCreds = { ...existingCreds, [emailKey]: data.password };
+      localStorage.setItem('evalscript_credentials', JSON.stringify(updatedCreds));
 
       dispatch({ type: 'ADD_USER', user: newUser });
       dispatch({ type: 'LOGIN_SUCCESS', user: newUser });
@@ -678,7 +700,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const createResultVersion = useCallback(
-    (evaluationId: string, reason: string, questionChanges: ResultVersion['questionChanges']) => {
+    (
+      evaluationId: string,
+      reason: string,
+      questionChanges: ResultVersion['questionChanges']
+    ) => {
       if (!state.currentUser) return;
       const existing = state.resultVersions.filter((v) => v.evaluationId === evaluationId);
       const evaluation = state.evaluations.find((e) => e.id === evaluationId);
