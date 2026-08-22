@@ -1,5 +1,6 @@
 import { supabase } from './supabase';
 import type { Submission, Evaluation, Exam, User } from '../types';
+import { DEMO_EXAMS } from './seed-data';
 
 export async function fetchProfile(userId: string): Promise<User | null> {
   const { data, error } = await supabase
@@ -20,6 +21,54 @@ export async function fetchProfile(userId: string): Promise<User | null> {
     department: data.department,
     calibrated: data.calibrated || false,
   };
+}
+
+/** If trigger failed, create profile manually from auth user */
+export async function ensureProfile(authUser: {
+  id: string;
+  email?: string | null;
+  user_metadata?: Record<string, any>;
+}): Promise<User | null> {
+  let profile = await fetchProfile(authUser.id);
+  if (profile) return profile;
+
+  const email = authUser.email || '';
+  const name =
+    authUser.user_metadata?.name ||
+    email.split('@')[0] ||
+    'User';
+  const role = (authUser.user_metadata?.role as string) || 'student';
+  const avatarInitials = name
+    .split(' ')
+    .filter(Boolean)
+    .map((w: string) => w[0])
+    .join('')
+    .toUpperCase()
+    .slice(0, 2);
+
+  const { error } = await supabase.from('profiles').upsert({
+    id: authUser.id,
+    email,
+    name,
+    role: ['student', 'faculty', 'admin'].includes(role) ? role : 'student',
+    avatar_initials: avatarInitials || 'U',
+    calibrated: false,
+  });
+
+  if (error) {
+    console.error('ensureProfile failed', error);
+    // Fallback local user so app still works
+    return {
+      id: authUser.id,
+      email,
+      name,
+      role: (role as User['role']) || 'student',
+      avatarInitials: avatarInitials || 'U',
+      calibrated: false,
+    };
+  }
+
+  return fetchProfile(authUser.id);
 }
 
 export async function fetchSubmissions(): Promise<Submission[]> {
@@ -59,7 +108,11 @@ export async function saveSubmission(submission: Submission) {
   if (error) throw error;
 }
 
-export async function updateSubmissionStatus(id: string, status: string, evaluationId?: string) {
+export async function updateSubmissionStatus(
+  id: string,
+  status: string,
+  evaluationId?: string
+) {
   const payload: any = { status };
   if (evaluationId) payload.evaluation_id = evaluationId;
   const { error } = await supabase.from('submissions').update(payload).eq('id', id);
@@ -93,22 +146,26 @@ export async function fetchEvaluations(): Promise<Evaluation[]> {
     console.error(error);
     return [];
   }
-  return (data || []).map((row: any) => row.data || {
-    id: row.id,
-    submissionId: row.submission_id,
-    studentId: row.student_id,
-    studentName: row.student_name,
-    examId: row.exam_id,
-    totalMarks: row.total_marks,
-    maxMarks: row.max_marks,
-    status: row.status,
-    facultyTotalMarks: row.faculty_total_marks,
-    facultyId: row.faculty_id,
-    facultyName: row.faculty_name,
-    facultyNotes: row.faculty_notes,
-    facultyReviewedAt: row.faculty_reviewed_at,
-    publishedAt: row.published_at,
-  });
+  return (data || []).map((row: any) =>
+    row.data
+      ? row.data
+      : {
+          id: row.id,
+          submissionId: row.submission_id,
+          studentId: row.student_id,
+          studentName: row.student_name,
+          examId: row.exam_id,
+          totalMarks: row.total_marks,
+          maxMarks: row.max_marks,
+          status: row.status,
+          facultyTotalMarks: row.faculty_total_marks,
+          facultyId: row.faculty_id,
+          facultyName: row.faculty_name,
+          facultyNotes: row.faculty_notes,
+          facultyReviewedAt: row.faculty_reviewed_at,
+          publishedAt: row.published_at,
+        }
+  );
 }
 
 export async function fetchExams(): Promise<Exam[]> {
@@ -143,4 +200,20 @@ export async function saveExam(exam: Exam) {
     student_ids: exam.studentIds || [],
   });
   if (error) throw error;
+}
+
+/** If cloud exams empty → seed DEMO_EXAMS once */
+export async function ensureExamsSeeded(): Promise<Exam[]> {
+  const existing = await fetchExams();
+  if (existing.length > 0) return existing;
+
+  for (const exam of DEMO_EXAMS) {
+    try {
+      await saveExam(exam);
+    } catch (e) {
+      console.warn('seed exam failed', exam.id, e);
+    }
+  }
+  const after = await fetchExams();
+  return after.length ? after : DEMO_EXAMS;
 }

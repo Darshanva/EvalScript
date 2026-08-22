@@ -22,7 +22,6 @@ import type {
   ResultVersion,
 } from '../types';
 import {
-  DEMO_EXAMS,
   DEMO_RUBRICS,
   DEMO_SUBMISSIONS,
   DEMO_EVALUATIONS,
@@ -30,19 +29,22 @@ import {
   DEMO_AUDIT_LOGS,
   DEMO_AI_USAGE,
   DEFAULT_SYSTEM_SETTINGS,
+  DEMO_EXAMS,
 } from '../lib/seed-data';
 import { runDemoEvaluation } from '../lib/demo-ai';
 import { supabase } from '../lib/supabase';
 import {
-  fetchProfile,
+  ensureProfile,
   fetchSubmissions,
   fetchEvaluations,
-  fetchExams,
+  ensureExamsSeeded,
   saveSubmission,
   updateSubmissionStatus,
   saveEvaluation,
   saveExam,
 } from '../lib/db';
+import { toPath } from '../lib/routes';
+import { navigationRef } from '../lib/navigation';
 
 interface AppState {
   currentUser: User | null;
@@ -210,7 +212,8 @@ const initialState: AppState = {
 
 interface AppContextValue {
   state: AppState;
-  navigate: (page: PageRoute, navCtx?: NavigationContext) => void;
+  /** Works with old keys ('s-submit') AND real paths ('/student/submit') */
+  navigate: (page: PageRoute | string, navCtx?: NavigationContext) => void;
   setAuthUser: (user: User | null) => void;
   logout: () => Promise<void>;
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
@@ -241,62 +244,54 @@ interface AppContextValue {
 
 const AppContext = createContext<AppContextValue | null>(null);
 
+async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
+  const [subs, evals, exams] = await Promise.all([
+    fetchSubmissions(),
+    fetchEvaluations(),
+    ensureExamsSeeded(),
+  ]);
+  dispatch({
+    type: 'SET_DATA',
+    payload: {
+      submissions: subs.length ? subs : DEMO_SUBMISSIONS,
+      evaluations: evals.length ? evals : DEMO_EVALUATIONS,
+      exams: exams.length ? exams : DEMO_EXAMS,
+    },
+  });
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialState);
 
-  // Supabase Auth session listener
   useEffect(() => {
     let mounted = true;
 
     async function init() {
       dispatch({ type: 'SET_AUTH_LOADING', loading: true });
-
-      const { data: { session } } = await supabase.auth.getSession();
+      const {
+        data: { session },
+      } = await supabase.auth.getSession();
 
       if (session?.user && mounted) {
-        const profile = await fetchProfile(session.user.id);
+        const profile = await ensureProfile(session.user);
         if (profile) {
           dispatch({ type: 'LOGIN_SUCCESS', user: profile });
-          // Load cloud data
-          const [subs, evals, exams] = await Promise.all([
-            fetchSubmissions(),
-            fetchEvaluations(),
-            fetchExams(),
-          ]);
-          dispatch({
-            type: 'SET_DATA',
-            payload: {
-              submissions: subs.length ? subs : DEMO_SUBMISSIONS,
-              evaluations: evals.length ? evals : DEMO_EVALUATIONS,
-              exams: exams.length ? exams : DEMO_EXAMS,
-            },
-          });
+          await loadCloudData(dispatch);
         }
       }
-
       if (mounted) dispatch({ type: 'SET_AUTH_LOADING', loading: false });
     }
 
     init();
 
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
       if (event === 'SIGNED_IN' && session?.user) {
-        const profile = await fetchProfile(session.user.id);
+        const profile = await ensureProfile(session.user);
         if (profile) {
           dispatch({ type: 'LOGIN_SUCCESS', user: profile });
-          const [subs, evals, exams] = await Promise.all([
-            fetchSubmissions(),
-            fetchEvaluations(),
-            fetchExams(),
-          ]);
-          dispatch({
-            type: 'SET_DATA',
-            payload: {
-              submissions: subs.length ? subs : DEMO_SUBMISSIONS,
-              evaluations: evals.length ? evals : DEMO_EVALUATIONS,
-              exams: exams.length ? exams : DEMO_EXAMS,
-            },
-          });
+          await loadCloudData(dispatch);
         }
       }
       if (event === 'SIGNED_OUT') {
@@ -310,8 +305,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const navigate = useCallback((page: PageRoute, navCtx?: NavigationContext) => {
-    dispatch({ type: 'NAVIGATE', page, navCtx });
+  const navigate = useCallback((page: PageRoute | string, navCtx?: NavigationContext) => {
+    const path = toPath(page);
+    dispatch({ type: 'NAVIGATE', page: page as PageRoute, navCtx });
+    // Real URL change (works even if page still uses old keys)
+    if (navigationRef.current) {
+      navigationRef.current(path);
+    }
   }, []);
 
   const setAuthUser = useCallback((user: User | null) => {
@@ -322,6 +322,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(async () => {
     await supabase.auth.signOut();
     dispatch({ type: 'LOGOUT' });
+    navigationRef.current?.('/');
   }, []);
 
   const showToast = useCallback(
@@ -332,17 +333,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
     []
   );
 
-  const clearToast = useCallback(() => {
-    dispatch({ type: 'CLEAR_TOAST' });
-  }, []);
+  const clearToast = useCallback(() => dispatch({ type: 'CLEAR_TOAST' }), []);
 
   const addAuditLog = useCallback((log: Omit<AuditLog, 'id' | 'timestamp'>) => {
-    const fullLog: AuditLog = {
-      ...log,
-      id: `audit-${Date.now()}`,
-      timestamp: new Date().toISOString(),
-    };
-    dispatch({ type: 'ADD_AUDIT_LOG', log: fullLog });
+    dispatch({
+      type: 'ADD_AUDIT_LOG',
+      log: { ...log, id: `audit-${Date.now()}`, timestamp: new Date().toISOString() },
+    });
   }, []);
 
   const submitExam = useCallback(
@@ -351,28 +348,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       try {
         await saveSubmission(submission);
       } catch (e) {
-        console.error('Failed to save submission to cloud', e);
-      }
-      if (state.currentUser) {
-        addAuditLog({
-          userId: state.currentUser.id,
-          userName: state.currentUser.name,
-          userRole: state.currentUser.role,
-          action: 'SUBMISSION_CREATED',
-          entity: 'submission',
-          entityId: submission.id,
-          details: `Submitted exam with ${submission.pageCount} pages.`,
-        });
+        console.error(e);
       }
     },
-    [state.currentUser, addAuditLog]
+    []
   );
 
   const processEvaluation = useCallback(
     (submissionId: string) => {
       const submission = state.submissions.find((s) => s.id === submissionId);
       if (!submission) return;
-
       const exam = state.exams.find((e) => e.id === submission.examId);
       const rubric = state.rubrics.find((r) => r.examId === submission.examId);
       if (!exam || !rubric) return;
@@ -387,7 +372,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
           examTitle: `${exam.title} (${exam.code})`,
           studentName: submission.studentName || 'Student',
         });
-
         dispatch({ type: 'ADD_EVALUATION', evaluation });
         dispatch({ type: 'UPDATE_SUBMISSION_STATUS', submissionId, status: 'AI_COMPLETE' });
         dispatch({
@@ -395,7 +379,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
           submissionId,
           evaluationId: evaluation.id,
         });
-
         try {
           await saveEvaluation(evaluation);
           await updateSubmissionStatus(submissionId, 'AI_COMPLETE', evaluation.id);
@@ -407,23 +390,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [state.submissions, state.exams, state.rubrics]
   );
 
-  const updateEvaluation = useCallback(
-    async (evaluation: Evaluation) => {
-      dispatch({ type: 'UPDATE_EVALUATION', evaluation });
-      try {
-        await saveEvaluation(evaluation);
-      } catch (e) {
-        console.error(e);
-      }
-    },
-    []
-  );
+  const updateEvaluation = useCallback(async (evaluation: Evaluation) => {
+    dispatch({ type: 'UPDATE_EVALUATION', evaluation });
+    try {
+      await saveEvaluation(evaluation);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
 
   const publishEvaluation = useCallback(
     async (evaluationId: string, facultyNotes?: string) => {
       const evaluation = state.evaluations.find((e) => e.id === evaluationId);
       if (!evaluation || !state.currentUser) return;
-
       const updatedEval: Evaluation = {
         ...evaluation,
         status: 'PUBLISHED',
@@ -433,14 +412,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
         facultyReviewedAt: evaluation.facultyReviewedAt ?? new Date().toISOString(),
         facultyNotes: facultyNotes ?? evaluation.facultyNotes,
       };
-
       dispatch({ type: 'UPDATE_EVALUATION', evaluation: updatedEval });
       dispatch({
         type: 'UPDATE_SUBMISSION_STATUS',
         submissionId: evaluation.submissionId,
         status: 'PUBLISHED',
       });
-
       try {
         await saveEvaluation(updatedEval);
         await updateSubmissionStatus(evaluation.submissionId, 'PUBLISHED');
@@ -451,17 +428,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     [state.evaluations, state.currentUser]
   );
 
-  const createExam = useCallback(
-    async (exam: Exam) => {
-      dispatch({ type: 'ADD_EXAM', exam });
-      try {
-        await saveExam(exam);
-      } catch (e) {
-        console.error(e);
-      }
-    },
-    []
-  );
+  const createExam = useCallback(async (exam: Exam) => {
+    dispatch({ type: 'ADD_EXAM', exam });
+    try {
+      await saveExam(exam);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
 
   const createRubric = useCallback((rubric: Rubric) => {
     dispatch({ type: 'ADD_RUBRIC', rubric });
@@ -483,7 +457,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const getExamsForCurrentUser = useCallback((): Exam[] => {
     if (!state.currentUser) return [];
     if (state.currentUser.role === 'student') {
-      return state.exams.filter((e) => e.studentIds?.includes(state.currentUser!.id));
+      // Show all active exams if studentIds empty (demo friendly)
+      return state.exams.filter(
+        (e) =>
+          !e.studentIds?.length || e.studentIds.includes(state.currentUser!.id)
+      );
     }
     if (state.currentUser.role === 'faculty') {
       return state.exams.filter((e) => e.facultyId === state.currentUser!.id);
@@ -497,10 +475,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return state.submissions.filter((s) => s.studentId === state.currentUser!.id);
     }
     if (state.currentUser.role === 'faculty') {
-      const facultyExamIds = state.exams
+      const ids = state.exams
         .filter((e) => e.facultyId === state.currentUser!.id)
         .map((e) => e.id);
-      return state.submissions.filter((s) => facultyExamIds.includes(s.examId));
+      return state.submissions.filter((s) => ids.includes(s.examId));
     }
     return state.submissions;
   }, [state.currentUser, state.exams, state.submissions]);
@@ -513,42 +491,42 @@ export function AppProvider({ children }: { children: ReactNode }) {
       );
     }
     if (state.currentUser.role === 'faculty') {
-      const facultyExamIds = state.exams
+      const ids = state.exams
         .filter((e) => e.facultyId === state.currentUser!.id)
         .map((e) => e.id);
-      return state.evaluations.filter((e) => facultyExamIds.includes(e.examId));
+      return state.evaluations.filter((e) => ids.includes(e.examId));
     }
     return state.evaluations;
   }, [state.currentUser, state.exams, state.evaluations]);
 
   const getPendingReviewsForFaculty = useCallback((): Evaluation[] => {
     if (!state.currentUser || state.currentUser.role !== 'faculty') return [];
-    const facultyExamIds = state.exams
+    const ids = state.exams
       .filter((e) => e.facultyId === state.currentUser!.id)
       .map((e) => e.id);
     return state.evaluations.filter(
       (e) =>
-        facultyExamIds.includes(e.examId) &&
+        ids.includes(e.examId) &&
         (e.status === 'AI_COMPLETE' || e.status === 'FACULTY_REVIEW')
     );
   }, [state.currentUser, state.exams, state.evaluations]);
 
   const getCalibrationForStudent = useCallback(
-    (studentId: string): CalibrationSample | undefined => {
-      return state.calibrations.find((c) => c.studentId === studentId);
-    },
+    (studentId: string) => state.calibrations.find((c) => c.studentId === studentId),
     [state.calibrations]
   );
 
   const submitDispute = useCallback(
     (disputeInput: Omit<DisputeRequest, 'id' | 'createdAt' | 'status'>) => {
-      const dispute: DisputeRequest = {
-        ...disputeInput,
-        id: `dispute-${Date.now()}`,
-        createdAt: new Date().toISOString(),
-        status: 'OPEN',
-      };
-      dispatch({ type: 'ADD_DISPUTE', dispute });
+      dispatch({
+        type: 'ADD_DISPUTE',
+        dispute: {
+          ...disputeInput,
+          id: `dispute-${Date.now()}`,
+          createdAt: new Date().toISOString(),
+          status: 'OPEN',
+        },
+      });
     },
     []
   );
@@ -557,38 +535,46 @@ export function AppProvider({ children }: { children: ReactNode }) {
     (disputeId: string, resolution: string, status: 'RESOLVED' | 'REJECTED') => {
       const dispute = state.disputes.find((d) => d.id === disputeId);
       if (!dispute || !state.currentUser) return;
-      const updated: DisputeRequest = {
-        ...dispute,
-        status,
-        resolution,
-        resolvedAt: new Date().toISOString(),
-        facultyId: state.currentUser.id,
-        facultyName: state.currentUser.name,
-      };
-      dispatch({ type: 'UPDATE_DISPUTE', dispute: updated });
+      dispatch({
+        type: 'UPDATE_DISPUTE',
+        dispute: {
+          ...dispute,
+          status,
+          resolution,
+          resolvedAt: new Date().toISOString(),
+          facultyId: state.currentUser.id,
+          facultyName: state.currentUser.name,
+        },
+      });
     },
     [state.disputes, state.currentUser]
   );
 
   const createResultVersion = useCallback(
-    (evaluationId: string, reason: string, questionChanges: ResultVersion['questionChanges']) => {
+    (
+      evaluationId: string,
+      reason: string,
+      questionChanges: ResultVersion['questionChanges']
+    ) => {
       if (!state.currentUser) return;
       const existing = state.resultVersions.filter((v) => v.evaluationId === evaluationId);
       const evaluation = state.evaluations.find((e) => e.id === evaluationId);
       if (!evaluation) return;
-      const version: ResultVersion = {
-        id: `version-${Date.now()}`,
-        evaluationId,
-        version: existing.length + 1,
-        totalMarks: evaluation.facultyTotalMarks ?? evaluation.totalMarks,
-        maxMarks: evaluation.maxMarks,
-        reason,
-        facultyId: state.currentUser.id,
-        facultyName: state.currentUser.name,
-        timestamp: new Date().toISOString(),
-        questionChanges,
-      };
-      dispatch({ type: 'ADD_RESULT_VERSION', version });
+      dispatch({
+        type: 'ADD_RESULT_VERSION',
+        version: {
+          id: `version-${Date.now()}`,
+          evaluationId,
+          version: existing.length + 1,
+          totalMarks: evaluation.facultyTotalMarks ?? evaluation.totalMarks,
+          maxMarks: evaluation.maxMarks,
+          reason,
+          facultyId: state.currentUser.id,
+          facultyName: state.currentUser.name,
+          timestamp: new Date().toISOString(),
+          questionChanges,
+        },
+      });
     },
     [state.currentUser, state.resultVersions, state.evaluations]
   );

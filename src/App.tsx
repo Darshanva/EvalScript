@@ -1,8 +1,15 @@
 import React, { useEffect } from 'react';
-import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import {
+  BrowserRouter,
+  Routes,
+  Route,
+  Navigate,
+  useNavigate,
+} from 'react-router-dom';
 import { AppProvider, useApp } from './context/AppContext';
 import { AppLayout } from './components/Layout';
 import { Toast, Spinner } from './components/ui';
+import { navigationRef } from './lib/navigation';
 
 import LandingPage from './pages/LandingPage';
 import AuthPage from './pages/AuthPage';
@@ -26,6 +33,19 @@ import UsagePage from './pages/admin/UsagePage';
 import AuditLogsPage from './pages/admin/AuditLogsPage';
 import SettingsPage from './pages/admin/SettingsPage';
 import GroqSetupPage from './pages/admin/GroqSetupPage';
+
+function NavigationBinder() {
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    navigationRef.current = (path: string) => navigate(path);
+    return () => {
+      navigationRef.current = null;
+    };
+  }, [navigate]);
+
+  return null;
+}
 
 function AutoProcessor() {
   const { state, processEvaluation } = useApp();
@@ -60,7 +80,9 @@ function ProtectedRoute({
     );
   }
 
-  if (!state.currentUser) return <Navigate to="/login" replace />;
+  if (!state.currentUser) {
+    return <Navigate to="/login" replace />;
+  }
 
   if (roles && !roles.includes(state.currentUser.role)) {
     return <Navigate to="/" replace />;
@@ -109,7 +131,6 @@ function AppRoutes() {
           element={!currentUser ? <AuthPage /> : <Navigate to={home} replace />}
         />
 
-        {/* Student */}
         <Route
           path="/student"
           element={
@@ -161,7 +182,6 @@ function AppRoutes() {
           }
         />
 
-        {/* Faculty */}
         <Route
           path="/faculty"
           element={
@@ -221,7 +241,6 @@ function AppRoutes() {
           }
         />
 
-        {/* Admin */}
         <Route
           path="/admin"
           element={
@@ -287,7 +306,9 @@ function AppRoutes() {
       </Routes>
 
       {currentUser && <AutoProcessor />}
-      {toast && <Toast message={toast.message} type={toast.type} onClose={clearToast} />}
+      {toast && (
+        <Toast message={toast.message} type={toast.type} onClose={clearToast} />
+      )}
     </>
   );
 }
