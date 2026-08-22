@@ -42,6 +42,7 @@ import {
   updateSubmissionStatus,
   saveEvaluation,
   saveExam,
+  deleteExam as deleteExamFromDb,
 } from '../lib/db';
 import { toPath } from '../lib/routes';
 import { navigationRef } from '../lib/navigation';
@@ -82,6 +83,7 @@ type AppAction =
   | { type: 'UPDATE_EVALUATION'; evaluation: Evaluation }
   | { type: 'ADD_EXAM'; exam: Exam }
   | { type: 'UPDATE_EXAM'; exam: Exam }
+  | { type: 'DELETE_EXAM'; examId: string }
   | { type: 'ADD_DISPUTE'; dispute: DisputeRequest }
   | { type: 'UPDATE_DISPUTE'; dispute: DisputeRequest }
   | { type: 'ADD_RESULT_VERSION'; version: ResultVersion }
@@ -143,6 +145,12 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         exams: state.exams.map((e) => (e.id === action.exam.id ? action.exam : e)),
+      };
+    case 'DELETE_EXAM':
+      return {
+        ...state,
+        exams: state.exams.filter((e) => e.id !== action.examId),
+        rubrics: state.rubrics.filter((r) => r.examId !== action.examId),
       };
     case 'ADD_RUBRIC':
       return { ...state, rubrics: [...state.rubrics, action.rubric] };
@@ -212,7 +220,6 @@ const initialState: AppState = {
 
 interface AppContextValue {
   state: AppState;
-  /** Works with old keys ('s-submit') AND real paths ('/student/submit') */
   navigate: (page: PageRoute | string, navCtx?: NavigationContext) => void;
   setAuthUser: (user: User | null) => void;
   logout: () => Promise<void>;
@@ -223,6 +230,7 @@ interface AppContextValue {
   updateEvaluation: (evaluation: Evaluation) => Promise<void>;
   publishEvaluation: (evaluationId: string, facultyNotes?: string) => Promise<void>;
   createExam: (exam: Exam) => Promise<void>;
+  deleteExam: (examId: string) => Promise<void>;
   createRubric: (rubric: Rubric) => void;
   updateRubric: (rubric: Rubric) => void;
   addCalibration: (calibration: CalibrationSample) => void;
@@ -250,12 +258,32 @@ async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
     fetchEvaluations(),
     ensureExamsSeeded(),
   ]);
+
+  // Load profiles (students/faculty) for enrol list
+  let users: User[] = [];
+  try {
+    const { data } = await supabase.from('profiles').select('*').order('name');
+    users = (data || []).map((row: any) => ({
+      id: row.id,
+      email: row.email,
+      name: row.name,
+      role: row.role,
+      avatarInitials: row.avatar_initials || row.name?.slice(0, 2).toUpperCase() || 'U',
+      studentId: row.student_id,
+      department: row.department,
+      calibrated: row.calibrated || false,
+    }));
+  } catch (e) {
+    console.warn('profiles load failed', e);
+  }
+
   dispatch({
     type: 'SET_DATA',
     payload: {
       submissions: subs.length ? subs : DEMO_SUBMISSIONS,
       evaluations: evals.length ? evals : DEMO_EVALUATIONS,
       exams: exams.length ? exams : DEMO_EXAMS,
+      users,
     },
   });
 }
@@ -308,7 +336,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const navigate = useCallback((page: PageRoute | string, navCtx?: NavigationContext) => {
     const path = toPath(page);
     dispatch({ type: 'NAVIGATE', page: page as PageRoute, navCtx });
-    // Real URL change (works even if page still uses old keys)
     if (navigationRef.current) {
       navigationRef.current(path);
     }
@@ -342,17 +369,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const submitExam = useCallback(
-    async (submission: Submission) => {
-      dispatch({ type: 'ADD_SUBMISSION', submission });
-      try {
-        await saveSubmission(submission);
-      } catch (e) {
-        console.error(e);
-      }
-    },
-    []
-  );
+  const submitExam = useCallback(async (submission: Submission) => {
+    dispatch({ type: 'ADD_SUBMISSION', submission });
+    try {
+      await saveSubmission(submission);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
 
   const processEvaluation = useCallback(
     (submissionId: string) => {
@@ -437,6 +461,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const deleteExam = useCallback(async (examId: string) => {
+    dispatch({ type: 'DELETE_EXAM', examId });
+    try {
+      await deleteExamFromDb(examId);
+    } catch (e) {
+      console.error('Failed to delete exam from cloud', e);
+      throw e;
+    }
+  }, []);
+
   const createRubric = useCallback((rubric: Rubric) => {
     dispatch({ type: 'ADD_RUBRIC', rubric });
   }, []);
@@ -457,10 +491,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const getExamsForCurrentUser = useCallback((): Exam[] => {
     if (!state.currentUser) return [];
     if (state.currentUser.role === 'student') {
-      // Show all active exams if studentIds empty (demo friendly)
       return state.exams.filter(
-        (e) =>
-          !e.studentIds?.length || e.studentIds.includes(state.currentUser!.id)
+        (e) => !e.studentIds?.length || e.studentIds.includes(state.currentUser!.id)
       );
     }
     if (state.currentUser.role === 'faculty') {
@@ -593,6 +625,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         updateEvaluation,
         publishEvaluation,
         createExam,
+        deleteExam,
         createRubric,
         updateRubric,
         addCalibration,

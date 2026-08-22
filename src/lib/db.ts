@@ -2,6 +2,11 @@ import { supabase } from './supabase';
 import type { Submission, Evaluation, Exam, User } from '../types';
 import { DEMO_EXAMS } from './seed-data';
 
+export async function deleteExam(examId: string) {
+  const { error } = await supabase.from('exams').delete().eq('id', examId);
+  if (error) throw error;
+}
+
 export async function fetchProfile(userId: string): Promise<User | null> {
   const { data, error } = await supabase
     .from('profiles')

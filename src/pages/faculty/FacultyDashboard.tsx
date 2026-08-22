@@ -1,4 +1,5 @@
-import React from 'react';
+import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import {
   Card,
@@ -27,13 +28,17 @@ function timeAgo(iso: string): string {
 export default function FacultyDashboard() {
   const {
     state,
-    navigate,
+    deleteExam,
+    showToast,
     getPendingReviewsForFaculty,
     getExamsForCurrentUser,
     getSubmissionsForCurrentUser,
     getEvaluationsForCurrentUser,
   } = useApp();
+  const navigate = useNavigate();
   const { currentUser } = state;
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
   if (!currentUser) return null;
 
   const pending = getPendingReviewsForFaculty();
@@ -42,14 +47,35 @@ export default function FacultyDashboard() {
   const evaluations = getEvaluationsForCurrentUser();
   const published = evaluations.filter((e) => e.status === 'PUBLISHED');
 
+  async function handleDeleteExam(examId: string, title: string) {
+    const ok = window.confirm(
+      `Delete exam "${title}"?\n\nThis will remove it from your list. This cannot be undone.`
+    );
+    if (!ok) return;
+
+    setDeletingId(examId);
+    try {
+      await deleteExam(examId);
+      showToast(`Exam "${title}" deleted`, 'success');
+    } catch (e) {
+      console.error(e);
+      showToast('Failed to delete exam', 'error');
+    } finally {
+      setDeletingId(null);
+    }
+  }
+
   return (
     <PageContainer>
       <PageHeader
         title={`Hello, ${currentUser.name.split(' ').slice(-1)[0]}`}
-        subtitle={`${currentUser.department} · Faculty Portal`}
+        subtitle={`${currentUser.department || 'Faculty'} · Faculty Portal`}
         breadcrumb="Faculty"
+        showBack={false}
         action={
-          <Button onClick={() => navigate('f-create-exam')}>+ Create Exam</Button>
+          <Button onClick={() => navigate('/faculty/create-exam')}>
+            + Create Exam
+          </Button>
         }
       />
 
@@ -72,7 +98,11 @@ export default function FacultyDashboard() {
           value={pending.length}
           sub={pending.length > 0 ? 'Requires your attention' : ''}
           icon={<span>◎</span>}
-          accent={pending.length > 0 ? 'bg-amber-50 text-amber-700' : 'bg-slate-50 text-slate-500'}
+          accent={
+            pending.length > 0
+              ? 'bg-amber-50 text-amber-700'
+              : 'bg-slate-50 text-slate-500'
+          }
         />
         <StatCard
           label="Published Results"
@@ -88,7 +118,11 @@ export default function FacultyDashboard() {
           <div className="flex items-center justify-between mb-4">
             <h2 className="font-semibold text-slate-900">Pending Reviews</h2>
             {pending.length > 0 && (
-              <Button size="sm" variant="secondary" onClick={() => navigate('f-reviews')}>
+              <Button
+                size="sm"
+                variant="secondary"
+                onClick={() => navigate('/faculty/reviews')}
+              >
                 View all ({pending.length})
               </Button>
             )}
@@ -104,34 +138,47 @@ export default function FacultyDashboard() {
           ) : (
             <div className="space-y-3">
               {pending.map((ev) => {
-                const sub = state.submissions.find((s) => s.id === ev.submissionId);
                 const exam = state.exams.find((e) => e.id === ev.examId);
                 return (
-                  <Card key={ev.id} className="flex items-start gap-4 hover:shadow-md transition-shadow">
+                  <Card
+                    key={ev.id}
+                    className="flex items-start gap-4 hover:shadow-md transition-shadow"
+                  >
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 mb-1 flex-wrap">
-                        <span className="font-medium text-slate-900">{ev.studentName}</span>
+                        <span className="font-medium text-slate-900">
+                          {ev.studentName}
+                        </span>
                         <Badge variant="muted">{exam?.code ?? ev.examId}</Badge>
                         <StatusBadge status={ev.status} />
                       </div>
                       <p className="text-sm text-slate-500 mb-2">{exam?.title}</p>
                       <div className="flex items-center gap-3 flex-wrap">
-                        <ConfidenceBadge level={ev.overallConfidenceLevel} score={ev.overallConfidence} />
-                        {ev.flags.slice(0, 2).map((f) => (
+                        <ConfidenceBadge
+                          level={ev.overallConfidenceLevel}
+                          score={ev.overallConfidence}
+                        />
+                        {(ev.flags || []).slice(0, 2).map((f) => (
                           <FlagBadge key={f} flag={f} />
                         ))}
-                        {ev.flags.length > 2 && (
-                          <Badge variant="warning">+{ev.flags.length - 2} flags</Badge>
+                        {(ev.flags || []).length > 2 && (
+                          <Badge variant="warning">
+                            +{(ev.flags || []).length - 2} flags
+                          </Badge>
                         )}
                       </div>
                       <p className="text-xs text-slate-400 mt-2">
                         AI scored: {ev.totalMarks}/{ev.maxMarks} ·{' '}
-                        {timeAgo(ev.aiGeneratedAt)}
+                        {ev.aiGeneratedAt ? timeAgo(ev.aiGeneratedAt) : ''}
                       </p>
                     </div>
                     <Button
                       size="sm"
-                      onClick={() => navigate('f-review', { selectedEvaluationId: ev.id })}
+                      onClick={() =>
+                        navigate('/faculty/review', {
+                          state: { selectedEvaluationId: ev.id },
+                        })
+                      }
                     >
                       Review
                     </Button>
@@ -144,12 +191,12 @@ export default function FacultyDashboard() {
 
         {/* Right column */}
         <div className="space-y-6">
-          {/* Your exams */}
+          {/* Your exams + Delete */}
           <Card>
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-semibold text-slate-900 text-sm">Your Exams</h3>
               <button
-                onClick={() => navigate('f-create-exam')}
+                onClick={() => navigate('/faculty/create-exam')}
                 className="text-xs text-navy-600 hover:text-navy-800"
               >
                 + New
@@ -164,21 +211,35 @@ export default function FacultyDashboard() {
                 {exams.map((exam) => {
                   const examSubs = submissions.filter((s) => s.examId === exam.id);
                   const examPending = evaluations.filter(
-                    (e) => e.examId === exam.id && (e.status === 'AI_COMPLETE' || e.status === 'FACULTY_REVIEW')
+                    (e) =>
+                      e.examId === exam.id &&
+                      (e.status === 'AI_COMPLETE' ||
+                        e.status === 'FACULTY_REVIEW')
                   ).length;
                   return (
                     <div
                       key={exam.id}
-                      className="flex items-center gap-3 py-2 border-b border-slate-50 last:border-0"
+                      className="flex items-center gap-2 py-2 border-b border-slate-50 last:border-0"
                     >
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-slate-800 truncate">{exam.title}</p>
+                        <p className="text-sm font-medium text-slate-800 truncate">
+                          {exam.title}
+                        </p>
                         <p className="text-xs text-slate-400">
                           {exam.code} · {examSubs.length} submissions
                           {examPending > 0 ? ` · ${examPending} pending` : ''}
                         </p>
                       </div>
                       <StatusBadge status={exam.status} />
+                      <button
+                        type="button"
+                        title="Delete exam"
+                        disabled={deletingId === exam.id}
+                        onClick={() => handleDeleteExam(exam.id, exam.title)}
+                        className="text-xs text-red-500 hover:text-red-700 hover:bg-red-50 px-2 py-1 rounded disabled:opacity-50 shrink-0"
+                      >
+                        {deletingId === exam.id ? '…' : 'Delete'}
+                      </button>
                     </div>
                   );
                 })}
@@ -188,13 +249,15 @@ export default function FacultyDashboard() {
 
           {/* Quick actions */}
           <Card>
-            <h3 className="font-semibold text-slate-900 text-sm mb-3">Quick Actions</h3>
+            <h3 className="font-semibold text-slate-900 text-sm mb-3">
+              Quick Actions
+            </h3>
             <div className="space-y-2">
               <Button
                 variant="secondary"
                 className="w-full justify-start"
                 size="sm"
-                onClick={() => navigate('f-create-exam')}
+                onClick={() => navigate('/faculty/create-exam')}
               >
                 <span>+</span> Create new exam
               </Button>
@@ -202,7 +265,7 @@ export default function FacultyDashboard() {
                 variant="secondary"
                 className="w-full justify-start"
                 size="sm"
-                onClick={() => navigate('f-reviews')}
+                onClick={() => navigate('/faculty/reviews')}
               >
                 <span>◎</span> Review pending evaluations
               </Button>
@@ -210,7 +273,7 @@ export default function FacultyDashboard() {
                 variant="secondary"
                 className="w-full justify-start"
                 size="sm"
-                onClick={() => navigate('f-results')}
+                onClick={() => navigate('/faculty/results')}
               >
                 <span>◉</span> View published results
               </Button>
@@ -219,15 +282,21 @@ export default function FacultyDashboard() {
 
           {/* Recent published */}
           <Card>
-            <h3 className="font-semibold text-slate-900 text-sm mb-3">Recently Published</h3>
+            <h3 className="font-semibold text-slate-900 text-sm mb-3">
+              Recently Published
+            </h3>
             {published.length === 0 ? (
-              <p className="text-xs text-slate-400 text-center py-3">Nothing published yet.</p>
+              <p className="text-xs text-slate-400 text-center py-3">
+                Nothing published yet.
+              </p>
             ) : (
               <div className="space-y-2">
                 {published.slice(0, 4).map((ev) => (
                   <div key={ev.id} className="flex items-center gap-2">
                     <div className="flex-1 min-w-0">
-                      <p className="text-xs font-medium text-slate-700 truncate">{ev.studentName}</p>
+                      <p className="text-xs font-medium text-slate-700 truncate">
+                        {ev.studentName}
+                      </p>
                       <ScoreBar
                         awarded={ev.facultyTotalMarks ?? ev.totalMarks}
                         max={ev.maxMarks}

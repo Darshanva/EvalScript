@@ -1,8 +1,19 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
-import { Button, Card, Input, Textarea, Select, Badge, Modal, StepIndicator, Spinner } from '../../components/ui';
+import {
+  Button,
+  Card,
+  Input,
+  Textarea,
+  Select,
+  Badge,
+  Modal,
+  StepIndicator,
+} from '../../components/ui';
 import { PageContainer, PageHeader } from '../../components/Layout';
-import type { Exam, Rubric, RubricQuestion, RubricCriterion } from '../../types';
+import type { Exam, Rubric, RubricQuestion, RubricCriterion, User } from '../../types';
+import { supabase } from '../../lib/supabase';
 
 type Step = 0 | 1 | 2;
 
@@ -20,8 +31,34 @@ function genId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
+async function loadStudentsFromCloud(): Promise<User[]> {
+  const { data, error } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('role', 'student')
+    .order('name');
+
+  if (error) {
+    console.error('loadStudentsFromCloud', error);
+    return [];
+  }
+
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    role: row.role as User['role'],
+    avatarInitials:
+      row.avatar_initials || row.name?.slice(0, 2).toUpperCase() || 'ST',
+    studentId: row.student_id,
+    department: row.department,
+    calibrated: row.calibrated || false,
+  }));
+}
+
 export default function CreateExamPage() {
-  const { state, navigate, createExam, createRubric, showToast } = useApp();
+  const { state, createExam, createRubric, showToast } = useApp();
+  const navigate = useNavigate();
   const { currentUser, users } = state;
   const [step, setStep] = useState<Step>(0);
 
@@ -50,16 +87,46 @@ export default function CreateExamPage() {
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Students
-  const studentList = users.filter((u) => u.role === 'student');
+  const [studentList, setStudentList] = useState<User[]>([]);
+  const [loadingStudents, setLoadingStudents] = useState(true);
   const [selectedStudents, setSelectedStudents] = useState<string[]>([]);
 
   const [saving, setSaving] = useState(false);
   const [successModal, setSuccessModal] = useState(false);
 
+  // Load students: context first, else cloud profiles
+  useEffect(() => {
+    let cancelled = false;
+
+    async function load() {
+      setLoadingStudents(true);
+      const fromContext = (users || []).filter((u) => u.role === 'student');
+      if (fromContext.length > 0) {
+        if (!cancelled) {
+          setStudentList(fromContext);
+          setLoadingStudents(false);
+        }
+        return;
+      }
+
+      const fromCloud = await loadStudentsFromCloud();
+      if (!cancelled) {
+        setStudentList(fromCloud);
+        setLoadingStudents(false);
+      }
+    }
+
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, [users]);
+
   if (!currentUser) return null;
 
   const totalRubricMarks = questions.reduce((sum, q) => sum + q.maxMarks, 0);
-  const allSelected = studentList.length > 0 && selectedStudents.length === studentList.length;
+  const allSelected =
+    studentList.length > 0 && selectedStudents.length === studentList.length;
 
   function addQuestion() {
     setQuestions((prev) => [
@@ -76,19 +143,29 @@ export default function CreateExamPage() {
 
   function removeQuestion(id: string) {
     setQuestions((prev) =>
-      prev.filter((q) => q.id !== id).map((q, i) => ({ ...q, number: String(i + 1) }))
+      prev
+        .filter((q) => q.id !== id)
+        .map((q, i) => ({ ...q, number: String(i + 1) }))
     );
   }
 
   function updateQuestion(id: string, patch: Partial<RubricQuestion>) {
-    setQuestions((prev) => prev.map((q) => (q.id === id ? { ...q, ...patch } : q)));
+    setQuestions((prev) =>
+      prev.map((q) => (q.id === id ? { ...q, ...patch } : q))
+    );
   }
 
   function addCriterion(qId: string) {
     setQuestions((prev) =>
       prev.map((q) =>
         q.id === qId
-          ? { ...q, criteria: [...q.criteria, { id: genId('rc'), description: '', maxMarks: 2 }] }
+          ? {
+              ...q,
+              criteria: [
+                ...q.criteria,
+                { id: genId('rc'), description: '', maxMarks: 2 },
+              ],
+            }
           : q
       )
     );
@@ -97,16 +174,27 @@ export default function CreateExamPage() {
   function removeCriterion(qId: string, cId: string) {
     setQuestions((prev) =>
       prev.map((q) =>
-        q.id === qId ? { ...q, criteria: q.criteria.filter((c) => c.id !== cId) } : q
+        q.id === qId
+          ? { ...q, criteria: q.criteria.filter((c) => c.id !== cId) }
+          : q
       )
     );
   }
 
-  function updateCriterion(qId: string, cId: string, patch: Partial<RubricCriterion>) {
+  function updateCriterion(
+    qId: string,
+    cId: string,
+    patch: Partial<RubricCriterion>
+  ) {
     setQuestions((prev) =>
       prev.map((q) =>
         q.id === qId
-          ? { ...q, criteria: q.criteria.map((c) => (c.id === cId ? { ...c, ...patch } : c)) }
+          ? {
+              ...q,
+              criteria: q.criteria.map((c) =>
+                c.id === cId ? { ...c, ...patch } : c
+              ),
+            }
           : q
       )
     );
@@ -136,7 +224,6 @@ export default function CreateExamPage() {
     }
   }
 
-  // ---------- AI Extraction (Demo + Real ready) ----------
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -151,7 +238,10 @@ export default function CreateExamPage() {
       'image/jpg',
     ];
 
-    if (!allowed.includes(file.type) && !file.name.match(/\.(pdf|docx?|jpe?g|png|webp)$/i)) {
+    if (
+      !allowed.includes(file.type) &&
+      !file.name.match(/\.(pdf|docx?|jpe?g|png|webp)$/i)
+    ) {
       showToast('Please upload PDF, Word, or Image file only.', 'error');
       return;
     }
@@ -160,53 +250,87 @@ export default function CreateExamPage() {
     setExtracting(true);
 
     try {
-      // Simulate AI extraction (replace with real Anthropic / backend call later)
       await new Promise((r) => setTimeout(r, 2200));
 
-      // Demo extracted questions (realistic sample)
       const extracted: RubricQuestion[] = [
         {
           id: genId('rq'),
           number: '1',
-          questionText: 'Explain the difference between stack and queue with suitable examples.',
+          questionText:
+            'Explain the difference between stack and queue with suitable examples.',
           maxMarks: 10,
           criteria: [
-            { id: genId('rc'), description: 'Correct definition of stack and queue', maxMarks: 3 },
-            { id: genId('rc'), description: 'Difference points (LIFO vs FIFO)', maxMarks: 4 },
-            { id: genId('rc'), description: 'Valid examples for both', maxMarks: 3 },
+            {
+              id: genId('rc'),
+              description: 'Correct definition of stack and queue',
+              maxMarks: 3,
+            },
+            {
+              id: genId('rc'),
+              description: 'Difference points (LIFO vs FIFO)',
+              maxMarks: 4,
+            },
+            {
+              id: genId('rc'),
+              description: 'Valid examples for both',
+              maxMarks: 3,
+            },
           ],
         },
         {
           id: genId('rq'),
           number: '2',
-          questionText: 'Write an algorithm for binary search and analyse its time complexity.',
+          questionText:
+            'Write an algorithm for binary search and analyse its time complexity.',
           maxMarks: 12,
           criteria: [
-            { id: genId('rc'), description: 'Correct binary search algorithm', maxMarks: 6 },
-            { id: genId('rc'), description: 'Time complexity analysis (best/avg/worst)', maxMarks: 4 },
-            { id: genId('rc'), description: 'Space complexity mentioned', maxMarks: 2 },
+            {
+              id: genId('rc'),
+              description: 'Correct binary search algorithm',
+              maxMarks: 6,
+            },
+            {
+              id: genId('rc'),
+              description: 'Time complexity analysis (best/avg/worst)',
+              maxMarks: 4,
+            },
+            {
+              id: genId('rc'),
+              description: 'Space complexity mentioned',
+              maxMarks: 2,
+            },
           ],
         },
         {
           id: genId('rq'),
           number: '3',
-          questionText: 'What is a Binary Search Tree? Insert the following elements and draw the tree: 50, 30, 70, 20, 40, 60, 80.',
+          questionText:
+            'What is a Binary Search Tree? Insert the following elements and draw the tree: 50, 30, 70, 20, 40, 60, 80.',
           maxMarks: 8,
           criteria: [
             { id: genId('rc'), description: 'Definition of BST', maxMarks: 2 },
-            { id: genId('rc'), description: 'Correct tree construction', maxMarks: 6 },
+            {
+              id: genId('rc'),
+              description: 'Correct tree construction',
+              maxMarks: 6,
+            },
           ],
         },
       ];
 
       setQuestions(extracted);
-      showToast(`Extracted ${extracted.length} questions from "${file.name}"`, 'success');
+      showToast(
+        `Extracted ${extracted.length} questions from "${file.name}"`,
+        'success'
+      );
     } catch (err) {
       console.error(err);
-      showToast('Failed to extract questions. Please try again or enter manually.', 'error');
+      showToast(
+        'Failed to extract questions. Please try again or enter manually.',
+        'error'
+      );
     } finally {
       setExtracting(false);
-      // Reset input so same file can be re-uploaded
       if (fileInputRef.current) fileInputRef.current.value = '';
     }
   }
@@ -217,40 +341,45 @@ export default function CreateExamPage() {
       return;
     }
     setSaving(true);
-    await new Promise((r) => setTimeout(r, 1000));
 
-    const examId = genId('exam');
-    const rubricId = genId('rubric');
+    try {
+      const examId = genId('exam');
+      const rubricId = genId('rubric');
 
-    const exam: Exam = {
-      id: examId,
-      title,
-      code,
-      subject,
-      facultyId: currentUser!.id,
-      facultyName: currentUser!.name,
-      date,
-      duration: parseInt(duration) || 180,
-      maxMarks: totalRubricMarks,
-      status: 'ACTIVE',
-      studentIds: selectedStudents,
-      rubricId,
-      description,
-      createdAt: new Date().toISOString(),
-    };
+      const exam: Exam = {
+        id: examId,
+        title,
+        code,
+        subject,
+        facultyId: currentUser!.id,
+        facultyName: currentUser!.name,
+        date,
+        duration: parseInt(duration) || 180,
+        maxMarks: totalRubricMarks,
+        status: 'ACTIVE',
+        studentIds: selectedStudents,
+        rubricId,
+        description,
+        createdAt: new Date().toISOString(),
+      };
 
-    const rubric: Rubric = {
-      id: rubricId,
-      examId,
-      questions,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
+      const rubric: Rubric = {
+        id: rubricId,
+        examId,
+        questions,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
 
-    createExam(exam);
-    createRubric(rubric);
-    setSaving(false);
-    setSuccessModal(true);
+      await createExam(exam);
+      createRubric(rubric);
+      setSuccessModal(true);
+    } catch (e) {
+      console.error(e);
+      showToast('Failed to create exam. Please try again.', 'error');
+    } finally {
+      setSaving(false);
+    }
   }
 
   return (
@@ -259,10 +388,14 @@ export default function CreateExamPage() {
         title="Create New Exam"
         subtitle="Define the exam details, rubric, and enrol students."
         breadcrumb="Faculty"
+        backTo="/faculty"
       />
 
       <div className="mb-8 max-w-2xl">
-        <StepIndicator steps={['Exam Details', 'Rubric', 'Students']} current={step} />
+        <StepIndicator
+          steps={['Exam Details', 'Rubric', 'Students']}
+          current={step}
+        />
       </div>
 
       {/* Step 0: Exam details */}
@@ -317,10 +450,13 @@ export default function CreateExamPage() {
             </div>
           </Card>
           <div className="flex gap-3">
-            <Button variant="ghost" onClick={() => navigate('f-dashboard')}>
+            <Button variant="ghost" onClick={() => navigate('/faculty')}>
               Cancel
             </Button>
-            <Button disabled={!title || !code || !date} onClick={() => setStep(1)}>
+            <Button
+              disabled={!title || !code || !date}
+              onClick={() => setStep(1)}
+            >
               Next: Rubric →
             </Button>
           </div>
@@ -330,12 +466,12 @@ export default function CreateExamPage() {
       {/* Step 1: Rubric */}
       {step === 1 && (
         <div className="max-w-2xl">
-          {/* ===== Upload Exam Paper Section ===== */}
           <Card className="mb-6 border-dashed border-2 border-navy-200 bg-navy-50/40">
             <div className="text-center py-2">
               <p className="font-semibold text-navy-900 mb-1">Upload Exam Paper</p>
               <p className="text-xs text-slate-500 mb-4">
-                PDF, Word (.docx) or Image → AI will extract questions, marks & criteria
+                PDF, Word (.docx) or Image → AI will extract questions, marks &
+                criteria
               </p>
 
               <input
@@ -359,7 +495,8 @@ export default function CreateExamPage() {
 
               {uploadedFileName && !extracting && (
                 <p className="text-xs text-emerald-600 mt-3">
-                  ✓ Extracted from: <span className="font-medium">{uploadedFileName}</span>
+                  ✓ Extracted from:{' '}
+                  <span className="font-medium">{uploadedFileName}</span>
                 </p>
               )}
             </div>
@@ -369,7 +506,9 @@ export default function CreateExamPage() {
             <div>
               <p className="text-sm text-slate-500">
                 Total marks:{' '}
-                <span className="font-semibold text-slate-900 font-mono">{totalRubricMarks}</span>
+                <span className="font-semibold text-slate-900 font-mono">
+                  {totalRubricMarks}
+                </span>
               </p>
             </div>
             <Button size="sm" variant="secondary" onClick={addQuestion}>
@@ -385,7 +524,9 @@ export default function CreateExamPage() {
                     <div className="w-7 h-7 bg-navy-900 text-white rounded-lg flex items-center justify-center text-sm font-semibold shrink-0">
                       {qi + 1}
                     </div>
-                    <span className="font-medium text-slate-800">Question {q.number}</span>
+                    <span className="font-medium text-slate-800">
+                      Question {q.number}
+                    </span>
                     <Badge variant="muted" className="font-mono">
                       {q.maxMarks} marks
                     </Badge>
@@ -406,13 +547,17 @@ export default function CreateExamPage() {
                     placeholder="Enter the question as it appears on the exam paper…"
                     rows={2}
                     value={q.questionText}
-                    onChange={(e) => updateQuestion(q.id, { questionText: e.target.value })}
+                    onChange={(e) =>
+                      updateQuestion(q.id, { questionText: e.target.value })
+                    }
                   />
                 </div>
 
                 <div className="mb-3">
                   <div className="flex items-center justify-between mb-2">
-                    <p className="text-sm font-medium text-slate-700">Marking Criteria</p>
+                    <p className="text-sm font-medium text-slate-700">
+                      Marking Criteria
+                    </p>
                     <button
                       onClick={() => addCriterion(q.id)}
                       className="text-xs text-navy-600 hover:text-navy-800"
@@ -422,7 +567,10 @@ export default function CreateExamPage() {
                   </div>
                   <div className="space-y-2">
                     {q.criteria.map((c, ci) => (
-                      <div key={c.id} className="flex items-start gap-2 bg-slate-50 rounded-lg p-2.5">
+                      <div
+                        key={c.id}
+                        className="flex items-start gap-2 bg-slate-50 rounded-lg p-2.5"
+                      >
                         <div className="flex-1 grid grid-cols-1 sm:grid-cols-3 gap-2">
                           <div className="sm:col-span-2">
                             <input
@@ -431,7 +579,9 @@ export default function CreateExamPage() {
                               placeholder={`Criterion ${ci + 1} description…`}
                               value={c.description}
                               onChange={(e) =>
-                                updateCriterion(q.id, c.id, { description: e.target.value })
+                                updateCriterion(q.id, c.id, {
+                                  description: e.target.value,
+                                })
                               }
                             />
                           </div>
@@ -446,7 +596,7 @@ export default function CreateExamPage() {
                                 updateCriterion(q.id, c.id, {
                                   maxMarks: parseInt(e.target.value) || 0,
                                 });
-                                syncQuestionMarks(q.id);
+                                setTimeout(() => syncQuestionMarks(q.id), 0);
                               }}
                             />
                             <span className="text-xs text-slate-400">marks</span>
@@ -484,44 +634,90 @@ export default function CreateExamPage() {
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-semibold text-slate-900">Enrol Students</h3>
               <div className="flex items-center gap-3">
-                <button
-                  onClick={toggleSelectAll}
-                  className="text-xs font-medium text-navy-600 hover:text-navy-800"
-                >
-                  {allSelected ? 'Deselect All' : 'Select All'}
-                </button>
-                <Badge variant="navy">{selectedStudents.length} selected</Badge>
+                {studentList.length > 0 && (
+                  <button
+                    onClick={toggleSelectAll}
+                    className="text-xs font-medium text-navy-600 hover:text-navy-800"
+                  >
+                    {allSelected ? 'Deselect All' : 'Select All'}
+                  </button>
+                )}
+                <Badge variant="navy">
+                  {selectedStudents.length} selected
+                </Badge>
               </div>
             </div>
 
-            <div className="space-y-2">
-              {studentList.map((student) => (
-                <label
-                  key={student.id}
-                  className="flex items-center gap-3 p-3 rounded-lg border border-slate-200 cursor-pointer hover:bg-slate-50 transition-colors"
+            {loadingStudents ? (
+              <p className="text-sm text-slate-500 py-6 text-center">
+                Loading students…
+              </p>
+            ) : studentList.length === 0 ? (
+              <div className="py-8 text-center">
+                <p className="text-sm font-medium text-slate-700 mb-1">
+                  No students found
+                </p>
+                <p className="text-xs text-slate-500 max-w-xs mx-auto mb-4">
+                  Register at least one account with role <strong>Student</strong>{' '}
+                  from the Sign Up page. Then refresh this page.
+                </p>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  onClick={async () => {
+                    setLoadingStudents(true);
+                    const list = await loadStudentsFromCloud();
+                    setStudentList(list);
+                    setLoadingStudents(false);
+                    if (list.length === 0) {
+                      showToast(
+                        'Still no students. Please register a student account first.',
+                        'info'
+                      );
+                    }
+                  }}
                 >
-                  <input
-                    type="checkbox"
-                    checked={selectedStudents.includes(student.id)}
-                    onChange={() => toggleStudent(student.id)}
-                    className="w-4 h-4 rounded accent-navy-900"
-                  />
-                  <div className="flex-1">
-                    <p className="text-sm font-medium text-slate-800">{student.name}</p>
-                    <p className="text-xs text-slate-400">
-                      {student.studentId} · {student.department}
-                      {!student.calibrated && (
-                        <span className="ml-2 text-amber-600">· Not calibrated</span>
-                      )}
-                    </p>
-                  </div>
-                </label>
-              ))}
-            </div>
+                  Refresh list
+                </Button>
+              </div>
+            ) : (
+              <div className="space-y-2 max-h-80 overflow-y-auto">
+                {studentList.map((student) => (
+                  <label
+                    key={student.id}
+                    className="flex items-center gap-3 p-3 rounded-lg border border-slate-200 cursor-pointer hover:bg-slate-50 transition-colors"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedStudents.includes(student.id)}
+                      onChange={() => toggleStudent(student.id)}
+                      className="w-4 h-4 rounded accent-navy-900"
+                    />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm font-medium text-slate-800 truncate">
+                        {student.name}
+                      </p>
+                      <p className="text-xs text-slate-400 truncate">
+                        {student.email}
+                        {student.studentId ? ` · ${student.studentId}` : ''}
+                        {student.department ? ` · ${student.department}` : ''}
+                        {!student.calibrated && (
+                          <span className="ml-2 text-amber-600">
+                            · Not calibrated
+                          </span>
+                        )}
+                      </p>
+                    </div>
+                  </label>
+                ))}
+              </div>
+            )}
           </Card>
 
           <Card className="mb-5 bg-navy-50 border-navy-200">
-            <h3 className="font-semibold text-navy-900 text-sm mb-3">Exam Summary</h3>
+            <h3 className="font-semibold text-navy-900 text-sm mb-3">
+              Exam Summary
+            </h3>
             <dl className="text-sm space-y-1">
               <div className="flex gap-2">
                 <dt className="text-navy-600 w-24 shrink-0">Title</dt>
@@ -545,7 +741,9 @@ export default function CreateExamPage() {
               </div>
               <div className="flex gap-2">
                 <dt className="text-navy-600 w-24 shrink-0">Students</dt>
-                <dd className="font-medium text-navy-900">{selectedStudents.length}</dd>
+                <dd className="font-medium text-navy-900">
+                  {selectedStudents.length}
+                </dd>
               </div>
             </dl>
           </Card>
@@ -565,7 +763,7 @@ export default function CreateExamPage() {
         open={successModal}
         onClose={() => {
           setSuccessModal(false);
-          navigate('f-dashboard');
+          navigate('/faculty');
         }}
         title="Exam Created"
       >
@@ -573,11 +771,13 @@ export default function CreateExamPage() {
           <div className="w-14 h-14 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-600 text-3xl mx-auto mb-4">
             ✓
           </div>
-          <p className="font-semibold text-slate-900 mb-1">&ldquo;{title}&rdquo; is live</p>
+          <p className="font-semibold text-slate-900 mb-1">
+            &ldquo;{title}&rdquo; is live
+          </p>
           <p className="text-sm text-slate-500 mb-5">
             The exam has been created and {selectedStudents.length} student
-            {selectedStudents.length !== 1 ? 's' : ''} enrolled. Students can now submit their
-            answer sheets.
+            {selectedStudents.length !== 1 ? 's' : ''} enrolled. Students can now
+            submit their answer sheets.
           </p>
           <div className="flex gap-3">
             <Button
@@ -585,7 +785,7 @@ export default function CreateExamPage() {
               className="flex-1"
               onClick={() => {
                 setSuccessModal(false);
-                navigate('f-dashboard');
+                navigate('/faculty');
               }}
             >
               Go to Dashboard
