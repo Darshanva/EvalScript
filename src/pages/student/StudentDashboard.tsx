@@ -1,6 +1,15 @@
 import React from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
-import { Card, Button, StatusBadge, Badge, StatCard, EmptyState, ScoreBar } from '../../components/ui';
+import {
+  Card,
+  Button,
+  StatusBadge,
+  Badge,
+  StatCard,
+  EmptyState,
+  ScoreBar,
+} from '../../components/ui';
 import { PageContainer, PageHeader } from '../../components/Layout';
 
 function formatDate(iso: string): string {
@@ -14,12 +23,12 @@ function formatDate(iso: string): string {
 export default function StudentDashboard() {
   const {
     state,
-    navigate,
     getExamsForCurrentUser,
     getSubmissionsForCurrentUser,
     getEvaluationsForCurrentUser,
     getCalibrationForStudent,
   } = useApp();
+  const navigate = useNavigate();
   const { currentUser } = state;
   if (!currentUser) return null;
 
@@ -36,28 +45,39 @@ export default function StudentDashboard() {
     return submissions.find((s) => s.examId === examId);
   }
 
+  const subtitle =
+    [currentUser.department, currentUser.studentId].filter(Boolean).join(' · ') ||
+    'Student Portal';
+
   return (
     <PageContainer>
       <PageHeader
         title={`Welcome back, ${currentUser.name.split(' ')[0]}`}
-        subtitle={`${currentUser.department} · ${currentUser.studentId}`}
+        subtitle={subtitle}
         breadcrumb="Student Portal"
+        showBack={false}
       />
 
       {/* Calibration alert */}
       {!isCalibrated && (
-        <div className="mb-6 px-5 py-4 bg-amber-50 border border-amber-200 rounded-xl flex items-start justify-between gap-4">
+        <div className="mb-6 px-5 py-4 bg-amber-50 border border-amber-200 rounded-xl flex items-start justify-between gap-4 flex-wrap">
           <div className="flex items-start gap-3">
             <span className="text-amber-500 text-xl mt-0.5">⚠</span>
             <div>
-              <p className="font-medium text-amber-900">Handwriting calibration required</p>
+              <p className="font-medium text-amber-900">
+                Handwriting calibration required
+              </p>
               <p className="text-sm text-amber-700 mt-0.5">
-                You must complete calibration before submitting any exam. It only takes a few
-                minutes.
+                You must complete calibration before submitting any exam. It only
+                takes a few minutes.
               </p>
             </div>
           </div>
-          <Button size="sm" variant="gold" onClick={() => navigate('s-calibration')}>
+          <Button
+            size="sm"
+            variant="gold"
+            onClick={() => navigate('/student/calibration')}
+          >
             Calibrate Now
           </Button>
         </div>
@@ -79,7 +99,11 @@ export default function StudentDashboard() {
         />
         <StatCard
           label="Pending Review"
-          value={pendingSubmissions.filter((s) => ['FACULTY_REVIEW', 'AI_COMPLETE'].includes(s.status)).length}
+          value={
+            pendingSubmissions.filter((s) =>
+              ['FACULTY_REVIEW', 'AI_COMPLETE'].includes(s.status)
+            ).length
+          }
           icon={<span>◎</span>}
           accent="bg-amber-50 text-amber-700"
         />
@@ -102,19 +126,25 @@ export default function StudentDashboard() {
               <EmptyState
                 icon={<span className="text-5xl">◉</span>}
                 title="No exams assigned"
-                description="Your faculty will assign exams to you when they are available."
+                description="Your faculty will assign exams to you when they are available. Ask faculty to enrol you when creating an exam."
               />
             </Card>
           ) : (
             <div className="space-y-3">
               {exams.map((exam) => {
                 const submission = getSubmissionForExam(exam.id);
-                const canSubmit = !submission && isCalibrated && exam.status === 'ACTIVE';
+                const canSubmit =
+                  !submission && isCalibrated && exam.status === 'ACTIVE';
                 return (
-                  <Card key={exam.id} className="flex items-start justify-between gap-4">
+                  <Card
+                    key={exam.id}
+                    className="flex items-start justify-between gap-4"
+                  >
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap mb-1">
-                        <span className="font-medium text-slate-900">{exam.title}</span>
+                        <span className="font-medium text-slate-900">
+                          {exam.title}
+                        </span>
                         <Badge variant="muted">{exam.code}</Badge>
                         <StatusBadge status={exam.status} />
                       </div>
@@ -139,7 +169,11 @@ export default function StudentDashboard() {
                       {canSubmit ? (
                         <Button
                           size="sm"
-                          onClick={() => navigate('s-submit', { selectedExamId: exam.id })}
+                          onClick={() =>
+                            navigate('/student/submit', {
+                              state: { selectedExamId: exam.id },
+                            })
+                          }
                         >
                           Submit
                         </Button>
@@ -147,7 +181,7 @@ export default function StudentDashboard() {
                         <Button
                           size="sm"
                           variant="ghost"
-                          onClick={() => navigate('s-results')}
+                          onClick={() => navigate('/student/results')}
                         >
                           View
                         </Button>
@@ -155,7 +189,7 @@ export default function StudentDashboard() {
                         <Button
                           size="sm"
                           variant="outline"
-                          onClick={() => navigate('s-calibration')}
+                          onClick={() => navigate('/student/calibration')}
                         >
                           Calibrate first
                         </Button>
@@ -175,7 +209,9 @@ export default function StudentDashboard() {
           {/* Calibration card */}
           <Card>
             <div className="flex items-start justify-between mb-3">
-              <h3 className="font-semibold text-slate-900 text-sm">Handwriting Calibration</h3>
+              <h3 className="font-semibold text-slate-900 text-sm">
+                Handwriting Calibration
+              </h3>
               <StatusBadge status={isCalibrated ? 'APPROVED' : 'PENDING'} />
             </div>
             {isCalibrated && calibration ? (
@@ -188,7 +224,7 @@ export default function StudentDashboard() {
                 <p className="text-xs text-slate-500">
                   Quality score:{' '}
                   <span className="font-mono font-medium text-slate-700">
-                    {Math.round(calibration.qualityScore * 100)}%
+                    {Math.round((calibration.qualityScore || 0) * 100)}%
                   </span>
                 </p>
                 <p className="text-xs text-slate-400 mt-0.5">
@@ -198,7 +234,7 @@ export default function StudentDashboard() {
                   size="sm"
                   variant="ghost"
                   className="mt-2 w-full"
-                  onClick={() => navigate('s-calibration')}
+                  onClick={() => navigate('/student/calibration')}
                 >
                   Retake calibration
                 </Button>
@@ -208,7 +244,10 @@ export default function StudentDashboard() {
                 <p className="text-sm text-slate-500 mb-3">
                   Complete calibration to enable exam submission.
                 </p>
-                <Button size="sm" onClick={() => navigate('s-calibration')}>
+                <Button
+                  size="sm"
+                  onClick={() => navigate('/student/calibration')}
+                >
                   Start Calibration
                 </Button>
               </div>
@@ -218,9 +257,11 @@ export default function StudentDashboard() {
           {/* Recent results */}
           <Card>
             <div className="flex items-center justify-between mb-3">
-              <h3 className="font-semibold text-slate-900 text-sm">Recent Results</h3>
+              <h3 className="font-semibold text-slate-900 text-sm">
+                Recent Results
+              </h3>
               <button
-                onClick={() => navigate('s-results')}
+                onClick={() => navigate('/student/results')}
                 className="text-xs text-navy-600 hover:text-navy-800"
               >
                 View all
@@ -238,11 +279,11 @@ export default function StudentDashboard() {
                     <div
                       key={ev.id}
                       className="cursor-pointer"
-                      onClick={() => navigate('s-result-detail', { selectedEvaluationId: ev.id })}
+                      onClick={() => navigate('/student/results')}
                     >
                       <div className="flex items-center justify-between mb-1">
                         <span className="text-sm font-medium text-slate-800 truncate">
-                          {ev.examTitle}
+                          {ev.examTitle || 'Exam'}
                         </span>
                         <span className="font-mono text-sm font-semibold text-slate-900 ml-2 shrink-0">
                           {finalMarks}/{ev.maxMarks}
