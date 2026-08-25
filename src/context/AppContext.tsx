@@ -23,10 +23,7 @@ import type {
 } from '../types';
 import {
   DEMO_RUBRICS,
-  DEMO_SUBMISSIONS,
-  DEMO_EVALUATIONS,
   DEMO_CALIBRATIONS,
-  DEMO_AUDIT_LOGS,
   DEMO_AI_USAGE,
   DEFAULT_SYSTEM_SETTINGS,
   DEMO_EXAMS,
@@ -43,6 +40,8 @@ import {
   saveEvaluation,
   saveExam,
   deleteExam as deleteExamFromDb,
+  fetchAuditLogs,
+  saveAuditLog,
 } from '../lib/db';
 import { toPath } from '../lib/routes';
 import { navigationRef } from '../lib/navigation';
@@ -198,6 +197,16 @@ function appReducer(state: AppState, action: AppAction): AppState {
   }
 }
 
+function loadSavedSettings(): SystemSettings {
+  try {
+    const raw = localStorage.getItem('evalscript_system_settings');
+    if (raw) return { ...DEFAULT_SYSTEM_SETTINGS, ...JSON.parse(raw) };
+  } catch {
+    /* ignore */
+  }
+  return DEFAULT_SYSTEM_SETTINGS;
+}
+
 const initialState: AppState = {
   currentUser: null,
   page: 'landing',
@@ -208,9 +217,9 @@ const initialState: AppState = {
   submissions: [],
   evaluations: [],
   calibrations: DEMO_CALIBRATIONS,
-  auditLogs: DEMO_AUDIT_LOGS,
+  auditLogs: [], // real only — no demo seed
   aiUsage: DEMO_AI_USAGE,
-  systemSettings: DEFAULT_SYSTEM_SETTINGS,
+  systemSettings: loadSavedSettings(),
   disputes: [],
   resultVersions: [],
   toast: null,
@@ -253,13 +262,13 @@ interface AppContextValue {
 const AppContext = createContext<AppContextValue | null>(null);
 
 async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
-  const [subs, evals, exams] = await Promise.all([
+  const [subs, evals, exams, logs] = await Promise.all([
     fetchSubmissions(),
     fetchEvaluations(),
     ensureExamsSeeded(),
+    fetchAuditLogs(),
   ]);
 
-  // Load profiles (students/faculty) for enrol list
   let users: User[] = [];
   try {
     const { data } = await supabase.from('profiles').select('*').order('name');
@@ -268,10 +277,12 @@ async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
       email: row.email,
       name: row.name,
       role: row.role,
-      avatarInitials: row.avatar_initials || row.name?.slice(0, 2).toUpperCase() || 'U',
+      avatarInitials:
+        row.avatar_initials || row.name?.slice(0, 2).toUpperCase() || 'U',
       studentId: row.student_id,
       department: row.department,
       calibrated: row.calibrated || false,
+      createdAt: row.created_at,
     }));
   } catch (e) {
     console.warn('profiles load failed', e);
@@ -280,10 +291,11 @@ async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
   dispatch({
     type: 'SET_DATA',
     payload: {
-      submissions: subs.length ? subs : DEMO_SUBMISSIONS,
-      evaluations: evals.length ? evals : DEMO_EVALUATIONS,
+      submissions: subs,
+      evaluations: evals,
       exams: exams.length ? exams : DEMO_EXAMS,
       users,
+      auditLogs: logs,
     },
   });
 }
@@ -363,20 +375,26 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const clearToast = useCallback(() => dispatch({ type: 'CLEAR_TOAST' }), []);
 
   const addAuditLog = useCallback((log: Omit<AuditLog, 'id' | 'timestamp'>) => {
-    dispatch({
-      type: 'ADD_AUDIT_LOG',
-      log: { ...log, id: `audit-${Date.now()}`, timestamp: new Date().toISOString() },
-    });
+    const fullLog: AuditLog = {
+      ...log,
+      id: `audit-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      timestamp: new Date().toISOString(),
+    };
+    dispatch({ type: 'ADD_AUDIT_LOG', log: fullLog });
+    saveAuditLog(fullLog).catch(console.error);
   }, []);
 
-  const submitExam = useCallback(async (submission: Submission) => {
-    dispatch({ type: 'ADD_SUBMISSION', submission });
-    try {
-      await saveSubmission(submission);
-    } catch (e) {
-      console.error(e);
-    }
-  }, []);
+  const submitExam = useCallback(
+    async (submission: Submission) => {
+      dispatch({ type: 'ADD_SUBMISSION', submission });
+      try {
+        await saveSubmission(submission);
+      } catch (e) {
+        console.error(e);
+      }
+    },
+    []
+  );
 
   const processEvaluation = useCallback(
     (submissionId: string) => {
@@ -448,18 +466,41 @@ export function AppProvider({ children }: { children: ReactNode }) {
       } catch (e) {
         console.error(e);
       }
+      addAuditLog({
+        userId: state.currentUser.id,
+        userName: state.currentUser.name,
+        userRole: state.currentUser.role,
+        action: 'RESULT_PUBLISHED',
+        entity: 'evaluation',
+        entityId: evaluationId,
+        details: `Published result for ${evaluation.studentName || 'student'}.`,
+      });
     },
-    [state.evaluations, state.currentUser]
+    [state.evaluations, state.currentUser, addAuditLog]
   );
 
-  const createExam = useCallback(async (exam: Exam) => {
-    dispatch({ type: 'ADD_EXAM', exam });
-    try {
-      await saveExam(exam);
-    } catch (e) {
-      console.error(e);
-    }
-  }, []);
+  const createExam = useCallback(
+    async (exam: Exam) => {
+      dispatch({ type: 'ADD_EXAM', exam });
+      try {
+        await saveExam(exam);
+      } catch (e) {
+        console.error(e);
+      }
+      if (state.currentUser) {
+        addAuditLog({
+          userId: state.currentUser.id,
+          userName: state.currentUser.name,
+          userRole: state.currentUser.role,
+          action: 'EXAM_CREATED',
+          entity: 'exam',
+          entityId: exam.id,
+          details: `Exam ${exam.code} (${exam.title}) created.`,
+        });
+      }
+    },
+    [state.currentUser, addAuditLog]
+  );
 
   const deleteExam = useCallback(async (examId: string) => {
     dispatch({ type: 'DELETE_EXAM', examId });
@@ -486,6 +527,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const updateSystemSettings = useCallback((settings: SystemSettings) => {
     dispatch({ type: 'UPDATE_SYSTEM_SETTINGS', settings });
+    try {
+      localStorage.setItem('evalscript_system_settings', JSON.stringify(settings));
+    } catch {
+      /* ignore */
+    }
   }, []);
 
   const getExamsForCurrentUser = useCallback((): Exam[] => {

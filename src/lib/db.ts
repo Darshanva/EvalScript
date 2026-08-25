@@ -1,11 +1,6 @@
 import { supabase } from './supabase';
-import type { Submission, Evaluation, Exam, User } from '../types';
+import type { Submission, Evaluation, Exam, User, AuditLog } from '../types';
 import { DEMO_EXAMS } from './seed-data';
-
-export async function deleteExam(examId: string) {
-  const { error } = await supabase.from('exams').delete().eq('id', examId);
-  if (error) throw error;
-}
 
 export async function fetchProfile(userId: string): Promise<User | null> {
   const { data, error } = await supabase
@@ -21,14 +16,15 @@ export async function fetchProfile(userId: string): Promise<User | null> {
     email: data.email,
     name: data.name,
     role: data.role,
-    avatarInitials: data.avatar_initials || data.name?.slice(0, 2).toUpperCase() || 'U',
+    avatarInitials:
+      data.avatar_initials || data.name?.slice(0, 2).toUpperCase() || 'U',
     studentId: data.student_id,
     department: data.department,
     calibrated: data.calibrated || false,
+    createdAt: data.created_at,
   };
 }
 
-/** If trigger failed, create profile manually from auth user */
 export async function ensureProfile(authUser: {
   id: string;
   email?: string | null;
@@ -39,9 +35,7 @@ export async function ensureProfile(authUser: {
 
   const email = authUser.email || '';
   const name =
-    authUser.user_metadata?.name ||
-    email.split('@')[0] ||
-    'User';
+    authUser.user_metadata?.name || email.split('@')[0] || 'User';
   const role = (authUser.user_metadata?.role as string) || 'student';
   const avatarInitials = name
     .split(' ')
@@ -62,7 +56,6 @@ export async function ensureProfile(authUser: {
 
   if (error) {
     console.error('ensureProfile failed', error);
-    // Fallback local user so app still works
     return {
       id: authUser.id,
       email,
@@ -189,6 +182,11 @@ export async function fetchExams(): Promise<Exam[]> {
     maxMarks: row.max_marks,
     status: row.status,
     studentIds: row.student_ids || [],
+    date: row.date,
+    duration: row.duration,
+    description: row.description,
+    rubricId: row.rubric_id,
+    createdAt: row.created_at,
   }));
 }
 
@@ -203,11 +201,20 @@ export async function saveExam(exam: Exam) {
     max_marks: exam.maxMarks,
     status: exam.status,
     student_ids: exam.studentIds || [],
+    date: exam.date,
+    duration: exam.duration,
+    description: exam.description,
+    rubric_id: exam.rubricId,
+    created_at: exam.createdAt,
   });
   if (error) throw error;
 }
 
-/** If cloud exams empty → seed DEMO_EXAMS once */
+export async function deleteExam(examId: string) {
+  const { error } = await supabase.from('exams').delete().eq('id', examId);
+  if (error) throw error;
+}
+
 export async function ensureExamsSeeded(): Promise<Exam[]> {
   const existing = await fetchExams();
   if (existing.length > 0) return existing;
@@ -221,4 +228,57 @@ export async function ensureExamsSeeded(): Promise<Exam[]> {
   }
   const after = await fetchExams();
   return after.length ? after : DEMO_EXAMS;
+}
+
+export async function fetchAuditLogs(): Promise<AuditLog[]> {
+  const { data, error } = await supabase
+    .from('audit_logs')
+    .select('*')
+    .order('timestamp', { ascending: false })
+    .limit(200);
+
+  if (error) {
+    console.error('fetchAuditLogs', error);
+    return [];
+  }
+
+  return (data || []).map((row: any) => ({
+    id: row.id,
+    userId: row.user_id,
+    userName: row.user_name,
+    userRole: row.user_role,
+    action: row.action,
+    entity: row.entity,
+    entityId: row.entity_id,
+    details: row.details,
+    ipAddress: row.ip_address,
+    timestamp: row.timestamp,
+  }));
+}
+
+export async function saveAuditLog(log: {
+  id: string;
+  userId?: string;
+  userName?: string;
+  userRole?: string;
+  action: string;
+  entity?: string;
+  entityId?: string;
+  details?: string;
+  ipAddress?: string;
+  timestamp: string;
+}) {
+  const { error } = await supabase.from('audit_logs').insert({
+    id: log.id,
+    user_id: log.userId || null,
+    user_name: log.userName || null,
+    user_role: log.userRole || null,
+    action: log.action,
+    entity: log.entity || null,
+    entity_id: log.entityId || null,
+    details: log.details || null,
+    ip_address: log.ipAddress || null,
+    timestamp: log.timestamp,
+  });
+  if (error) console.error('saveAuditLog', error);
 }
