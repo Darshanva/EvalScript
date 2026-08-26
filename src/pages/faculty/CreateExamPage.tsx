@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import {
@@ -9,21 +9,28 @@ import {
   Select,
   Badge,
   Modal,
-  StepIndicator,
 } from '../../components/ui';
 import { PageContainer, PageHeader } from '../../components/Layout';
-import type { Exam, Rubric, RubricQuestion, RubricCriterion, User } from '../../types';
+import type { Exam, Rubric, RubricQuestion, User } from '../../types';
 import { supabase } from '../../lib/supabase';
+import {
+  loadExamTree,
+  saveExamTree,
+  getItemsAtLevel,
+  addTreeItem,
+  EMPTY_PATH,
+  LEVEL_TITLES,
+  type TreeLevel,
+  type TreePath,
+} from '../../lib/exam-tree';
 
-type Step = 0 | 1 | 2;
+type Level = TreeLevel | 'form';
 
 const SUBJECTS = [
   { value: 'Computer Science', label: 'Computer Science' },
   { value: 'Mathematics', label: 'Mathematics' },
-  { value: 'Physics', label: 'Physics' },
-  { value: 'Chemistry', label: 'Chemistry' },
-  { value: 'Engineering', label: 'Engineering' },
-  { value: 'Economics', label: 'Economics' },
+  { value: 'Banking', label: 'Banking' },
+  { value: 'Finance', label: 'Finance' },
   { value: 'Other', label: 'Other' },
 ];
 
@@ -37,12 +44,10 @@ async function loadStudentsFromCloud(): Promise<User[]> {
     .select('*')
     .eq('role', 'student')
     .order('name');
-
   if (error) {
-    console.error('loadStudentsFromCloud', error);
+    console.error(error);
     return [];
   }
-
   return (data || []).map((row: any) => ({
     id: row.id,
     email: row.email,
@@ -60,39 +65,41 @@ export default function CreateExamPage() {
   const { state, createExam, createRubric, showToast } = useApp();
   const navigate = useNavigate();
   const { currentUser, users } = state;
-  const [step, setStep] = useState<Step>(0);
+
+  const [tree, setTree] = useState(loadExamTree);
+  const [level, setLevel] = useState<Level>('vertical');
+  const [path, setPath] = useState<TreePath>({ ...EMPTY_PATH });
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState('');
 
   const [title, setTitle] = useState('');
   const [code, setCode] = useState('');
-  const [subject, setSubject] = useState('Computer Science');
+  const [subject, setSubject] = useState('Banking');
   const [date, setDate] = useState('');
   const [duration, setDuration] = useState('180');
   const [description, setDescription] = useState('');
-
   const [questions, setQuestions] = useState<RubricQuestion[]>([
     {
       id: genId('rq'),
       number: '1',
       questionText: '',
       maxMarks: 10,
-      criteria: [{ id: genId('rc'), description: '', maxMarks: 10, order: '' }],
+      criteria: [{ id: genId('rc'), description: '', maxMarks: 10 }],
     },
   ]);
-
-  const [extracting, setExtracting] = useState(false);
-  const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-
-  const [studentList, setStudentList] = useState<User[]>([]);
-  const [loadingStudents, setLoadingStudents] = useState(true);
   const [selectedStudents, setSelectedStudents] = useState<string[]>([]);
-
+  const [studentList, setStudentList] = useState<User[]>([]);
+  const [loadingStudents, setLoadingStudents] = useState(false);
   const [saving, setSaving] = useState(false);
   const [successModal, setSuccessModal] = useState(false);
+  const [formStep, setFormStep] = useState<0 | 1 | 2>(0);
+
+  useEffect(() => {
+    saveExamTree(tree);
+  }, [tree]);
 
   useEffect(() => {
     let cancelled = false;
-
     async function load() {
       setLoadingStudents(true);
       const fromContext = (users || []).filter((u) => u.role === 'student');
@@ -103,14 +110,12 @@ export default function CreateExamPage() {
         }
         return;
       }
-
       const fromCloud = await loadStudentsFromCloud();
       if (!cancelled) {
         setStudentList(fromCloud);
         setLoadingStudents(false);
       }
     }
-
     load();
     return () => {
       cancelled = true;
@@ -119,233 +124,98 @@ export default function CreateExamPage() {
 
   if (!currentUser) return null;
 
-  const totalRubricMarks = questions.reduce((sum, q) => sum + q.maxMarks, 0);
-  const allSelected =
-    studentList.length > 0 && selectedStudents.length === studentList.length;
+  const totalRubricMarks = questions.reduce((s, q) => s + (q.maxMarks || 0), 0);
+  const treeLevel = level === 'form' ? 'subject' : level;
+  const items =
+    level === 'form' ? [] : getItemsAtLevel(tree, treeLevel as TreeLevel, path);
 
-  function addQuestion() {
-    setQuestions((prev) => [
-      ...prev,
-      {
-        id: genId('rq'),
-        number: String(prev.length + 1),
-        questionText: '',
-        maxMarks: 10,
-        criteria: [{ id: genId('rc'), description: '', maxMarks: 10 }],
-      },
-    ]);
-  }
+  const breadcrumbParts = [
+    path.vertical,
+    path.org,
+    path.batch,
+    path.term,
+    path.section,
+    path.subject,
+  ].filter(Boolean);
 
-  function removeQuestion(id: string) {
-    setQuestions((prev) =>
-      prev
-        .filter((q) => q.id !== id)
-        .map((q, i) => ({ ...q, number: String(i + 1) }))
-    );
-  }
-
-  function updateQuestion(id: string, patch: Partial<RubricQuestion>) {
-    setQuestions((prev) =>
-      prev.map((q) => (q.id === id ? { ...q, ...patch } : q))
-    );
-  }
-
-  function addCriterion(qId: string) {
-    setQuestions((prev) =>
-      prev.map((q) =>
-        q.id === qId
-          ? {
-              ...q,
-              criteria: [
-                ...q.criteria,
-                { id: genId('rc'), description: '', maxMarks: 2 },
-              ],
-            }
-          : q
-      )
-    );
-  }
-
-  function removeCriterion(qId: string, cId: string) {
-    setQuestions((prev) =>
-      prev.map((q) =>
-        q.id === qId
-          ? { ...q, criteria: q.criteria.filter((c) => c.id !== cId) }
-          : q
-      )
-    );
-  }
-
-  function updateCriterion(
-    qId: string,
-    cId: string,
-    patch: Partial<RubricCriterion>
-  ) {
-    setQuestions((prev) =>
-      prev.map((q) =>
-        q.id === qId
-          ? {
-              ...q,
-              criteria: q.criteria.map((c) =>
-                c.id === cId ? { ...c, ...patch } : c
-              ),
-            }
-          : q
-      )
-    );
-  }
-
-  function syncQuestionMarks(qId: string) {
-    setQuestions((prev) =>
-      prev.map((q) => {
-        if (q.id !== qId) return q;
-        const total = q.criteria.reduce((sum, c) => sum + (c.maxMarks || 0), 0);
-        return { ...q, maxMarks: total };
-      })
-    );
-  }
-
-  function toggleStudent(id: string) {
-    setSelectedStudents((prev) =>
-      prev.includes(id) ? prev.filter((s) => s !== id) : [...prev, id]
-    );
-  }
-
-  function toggleSelectAll() {
-    if (allSelected) {
-      setSelectedStudents([]);
-    } else {
-      setSelectedStudents(studentList.map((s) => s.id));
+  function openItem(name: string) {
+    if (level === 'vertical') {
+      setPath({ ...EMPTY_PATH, vertical: name });
+      setLevel('org');
+    } else if (level === 'org') {
+      setPath((p) => ({ ...p, org: name }));
+      setLevel('batch');
+    } else if (level === 'batch') {
+      setPath((p) => ({ ...p, batch: name }));
+      setLevel('term');
+    } else if (level === 'term') {
+      setPath((p) => ({ ...p, term: name }));
+      setLevel('section');
+    } else if (level === 'section') {
+      setPath((p) => ({ ...p, section: name }));
+      setLevel('subject');
+    } else if (level === 'subject') {
+      setPath((p) => ({ ...p, subject: name }));
+      setTitle(name);
+      setLevel('form');
+      setFormStep(0);
     }
   }
 
-  async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const allowed = [
-      'application/pdf',
-      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/msword',
-      'image/jpeg',
-      'image/png',
-      'image/webp',
-      'image/jpg',
-    ];
-
-    if (
-      !allowed.includes(file.type) &&
-      !file.name.match(/\.(pdf|docx?|jpe?g|png|webp)$/i)
-    ) {
-      showToast('Please upload PDF, Word, or Image file only.', 'error');
+  function goBack() {
+    setAdding(false);
+    setNewName('');
+    if (level === 'form') {
+      setLevel('subject');
       return;
     }
-
-    setUploadedFileName(file.name);
-    setExtracting(true);
-
-    try {
-      await new Promise((r) => setTimeout(r, 2200));
-
-      const extracted: RubricQuestion[] = [
-        {
-          id: genId('rq'),
-          number: '1',
-          questionText:
-            'Explain the difference between stack and queue with suitable examples.',
-          maxMarks: 10,
-          criteria: [
-            {
-              id: genId('rc'),
-              description: 'Correct definition of stack and queue',
-              maxMarks: 3,
-            },
-            {
-              id: genId('rc'),
-              description: 'Difference points (LIFO vs FIFO)',
-              maxMarks: 4,
-            },
-            {
-              id: genId('rc'),
-              description: 'Valid examples for both',
-              maxMarks: 3,
-            },
-          ],
-        },
-        {
-          id: genId('rq'),
-          number: '2',
-          questionText:
-            'Write an algorithm for binary search and analyse its time complexity.',
-          maxMarks: 12,
-          criteria: [
-            {
-              id: genId('rc'),
-              description: 'Correct binary search algorithm',
-              maxMarks: 6,
-            },
-            {
-              id: genId('rc'),
-              description: 'Time complexity analysis (best/avg/worst)',
-              maxMarks: 4,
-            },
-            {
-              id: genId('rc'),
-              description: 'Space complexity mentioned',
-              maxMarks: 2,
-            },
-          ],
-        },
-        {
-          id: genId('rq'),
-          number: '3',
-          questionText:
-            'What is a Binary Search Tree? Insert the following elements and draw the tree: 50, 30, 70, 20, 40, 60, 80.',
-          maxMarks: 8,
-          criteria: [
-            { id: genId('rc'), description: 'Definition of BST', maxMarks: 2 },
-            {
-              id: genId('rc'),
-              description: 'Correct tree construction',
-              maxMarks: 6,
-            },
-          ],
-        },
-      ];
-
-      setQuestions(extracted);
-      showToast(
-        `Extracted ${extracted.length} questions from "${file.name}"`,
-        'success'
-      );
-    } catch (err) {
-      console.error(err);
-      showToast(
-        'Failed to extract questions. Please try again or enter manually.',
-        'error'
-      );
-    } finally {
-      setExtracting(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
+    if (level === 'subject') {
+      setPath((p) => ({ ...p, subject: '', section: '' }));
+      setLevel('section');
+      return;
     }
+    if (level === 'section') {
+      setPath((p) => ({ ...p, section: '', term: '' }));
+      setLevel('term');
+      return;
+    }
+    if (level === 'term') {
+      setPath((p) => ({ ...p, term: '', batch: '' }));
+      setLevel('batch');
+      return;
+    }
+    if (level === 'batch') {
+      setPath((p) => ({ ...p, batch: '', org: '' }));
+      setLevel('org');
+      return;
+    }
+    if (level === 'org') {
+      setPath({ ...EMPTY_PATH });
+      setLevel('vertical');
+      return;
+    }
+    navigate('/faculty');
   }
 
-  // FIXED: define exam/rubric FIRST, then await createExam once
+  function handleAdd() {
+    const name = newName.trim();
+    if (!name || level === 'form') return;
+    setTree((prev) => addTreeItem(prev, level as TreeLevel, path, name));
+    setNewName('');
+    setAdding(false);
+    showToast(`Added "${name}"`, 'success');
+  }
+
   async function handleSave() {
     if (!title || !code || !date) {
-      showToast('Please fill in all required fields.', 'error');
+      showToast('Fill title, code and date', 'error');
       return;
     }
-    if (!currentUser) {
-      showToast('Not logged in', 'error');
-      return;
-    }
-
     setSaving(true);
-
     try {
       const examId = genId('exam');
       const rubricId = genId('rubric');
+      const hierarchyPath = breadcrumbParts.join(' > ');
 
       const exam: Exam = {
         id: examId,
@@ -360,7 +230,9 @@ export default function CreateExamPage() {
         status: 'ACTIVE',
         studentIds: selectedStudents,
         rubricId,
-        description: description.trim(),
+        description: [description.trim(), hierarchyPath ? `Path: ${hierarchyPath}` : '']
+          .filter(Boolean)
+          .join('\n'),
         createdAt: new Date().toISOString(),
       };
 
@@ -374,381 +246,297 @@ export default function CreateExamPage() {
 
       await createExam(exam);
       createRubric(rubric);
-
       setSuccessModal(true);
-      showToast('Exam saved successfully', 'success');
+      showToast('Exam saved', 'success');
     } catch (e: any) {
-      console.error('handleSave error', e);
-      showToast(e?.message || 'Exam save failed. Check console.', 'error');
+      console.error(e);
+      showToast(e?.message || 'Save failed', 'error');
     } finally {
       setSaving(false);
     }
   }
 
+  if (level !== 'form') {
+    return (
+      <PageContainer>
+        <PageHeader
+          title={LEVEL_TITLES[level as TreeLevel] || 'Select'}
+          subtitle="Tap a card to open next level. + to add."
+          breadcrumb="Faculty"
+          showBack
+          backTo="/faculty"
+        />
+
+        {breadcrumbParts.length > 0 && (
+          <div className="mb-4 flex flex-wrap items-center gap-1 text-sm text-slate-500">
+            <button
+              type="button"
+              className="text-navy-600 hover:underline"
+              onClick={() => {
+                setPath({ ...EMPTY_PATH });
+                setLevel('vertical');
+              }}
+            >
+              Root
+            </button>
+            {breadcrumbParts.map((part, i) => (
+              <span key={i} className="flex items-center gap-1">
+                <span className="text-slate-300">›</span>
+                <span className="font-medium text-slate-700">{part}</span>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className="flex items-center justify-between mb-4">
+          <Button variant="ghost" size="sm" onClick={goBack}>
+            ← Back
+          </Button>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => {
+              setAdding(true);
+              setNewName('');
+            }}
+          >
+            + Add {LEVEL_TITLES[level as TreeLevel]}
+          </Button>
+        </div>
+
+        {adding && (
+          <Card className="mb-4 flex flex-col sm:flex-row gap-3 items-end">
+            <div className="flex-1 w-full">
+              <Input
+                label="Name"
+                value={newName}
+                onChange={(e) => setNewName(e.target.value)}
+                placeholder="Name…"
+              />
+            </div>
+            <Button onClick={handleAdd}>Add</Button>
+            <Button variant="ghost" onClick={() => setAdding(false)}>
+              Cancel
+            </Button>
+          </Card>
+        )}
+
+        {items.length === 0 ? (
+          <Card>
+            <p className="text-sm text-slate-500 text-center py-10">
+              Empty. Use + Add.
+            </p>
+          </Card>
+        ) : (
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+            {items.map((name) => (
+              <button
+                key={name}
+                type="button"
+                onClick={() => openItem(name)}
+                className="text-left p-5 rounded-xl border-2 border-slate-200 bg-white hover:border-navy-400 hover:shadow-md transition-all"
+              >
+                <p className="font-semibold text-slate-900">{name}</p>
+                <p className="text-xs text-slate-400 mt-1">Tap to open →</p>
+              </button>
+            ))}
+          </div>
+        )}
+      </PageContainer>
+    );
+  }
+
   return (
     <PageContainer>
       <PageHeader
-        title="Create New Exam"
-        subtitle="Define the exam details, rubric, and enrol students."
+        title="Create Exam"
+        subtitle={breadcrumbParts.join(' › ')}
         breadcrumb="Faculty"
         showBack
         backTo="/faculty"
       />
 
-      <div className="mb-8 max-w-2xl">
-        <StepIndicator
-          steps={['Exam Details', 'Rubric', 'Students']}
-          current={step}
-        />
+      <Button variant="ghost" size="sm" className="mb-4" onClick={goBack}>
+        ← Back to subjects
+      </Button>
+
+      <div className="flex gap-2 mb-6 text-xs font-medium">
+        {['Details', 'Rubric', 'Students'].map((label, i) => (
+          <button
+            key={label}
+            type="button"
+            onClick={() => setFormStep(i as 0 | 1 | 2)}
+            className={`px-3 py-1.5 rounded-full ${
+              formStep === i ? 'bg-navy-900 text-white' : 'bg-slate-100 text-slate-600'
+            }`}
+          >
+            {i + 1}. {label}
+          </button>
+        ))}
       </div>
 
-      {step === 0 && (
-        <div className="max-w-xl space-y-5">
-          <Card>
-            <h3 className="font-semibold text-slate-900 mb-4">Exam Information</h3>
-            <div className="space-y-4">
+      {formStep === 0 && (
+        <div className="max-w-xl space-y-4">
+          <Card className="space-y-4">
+            <Input label="Exam Title *" value={title} onChange={(e) => setTitle(e.target.value)} />
+            <div className="grid grid-cols-2 gap-4">
               <Input
-                label="Exam Title *"
-                placeholder="e.g. Data Structures and Algorithms"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
+                label="Exam Code *"
+                value={code}
+                onChange={(e) => setCode(e.target.value.toUpperCase())}
               />
-              <div className="grid grid-cols-2 gap-4">
-                <Input
-                  label="Exam Code *"
-                  placeholder="e.g. CS201"
-                  value={code}
-                  onChange={(e) => setCode(e.target.value.toUpperCase())}
-                />
-                <Select
-                  label="Subject"
-                  options={SUBJECTS}
-                  value={subject}
-                  onChange={(e) => setSubject(e.target.value)}
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-4">
-                <Input
-                  label="Exam Date *"
-                  type="date"
-                  value={date}
-                  onChange={(e) => setDate(e.target.value)}
-                />
-                <Input
-                  label="Duration (minutes)"
-                  type="number"
-                  min="30"
-                  max="300"
-                  value={duration}
-                  onChange={(e) => setDuration(e.target.value)}
-                />
-              </div>
-              <Textarea
-                label="Description (optional)"
-                placeholder="Brief description of topics covered…"
-                rows={3}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
+              <Select
+                label="Subject"
+                options={SUBJECTS}
+                value={subject}
+                onChange={(e) => setSubject(e.target.value)}
               />
             </div>
+            <div className="grid grid-cols-2 gap-4">
+              <Input
+                label="Exam Date *"
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+              />
+              <Input
+                label="Duration (min)"
+                type="number"
+                value={duration}
+                onChange={(e) => setDuration(e.target.value)}
+              />
+            </div>
+            <Textarea
+              label="Description"
+              rows={2}
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+            />
           </Card>
-          <div className="flex gap-3">
-            <Button variant="ghost" onClick={() => navigate('/faculty')}>
-              Cancel
-            </Button>
+          <Button disabled={!title || !code || !date} onClick={() => setFormStep(1)}>
+            Next: Rubric →
+          </Button>
+        </div>
+      )}
+
+      {formStep === 1 && (
+        <div className="max-w-2xl space-y-4">
+          <div className="flex justify-between">
+            <p className="text-sm text-slate-500">
+              Total: <span className="font-mono font-semibold">{totalRubricMarks}</span>
+            </p>
             <Button
-              disabled={!title || !code || !date}
-              onClick={() => setStep(1)}
+              size="sm"
+              variant="secondary"
+              onClick={() =>
+                setQuestions((prev) => [
+                  ...prev,
+                  {
+                    id: genId('rq'),
+                    number: String(prev.length + 1),
+                    questionText: '',
+                    maxMarks: 10,
+                    criteria: [{ id: genId('rc'), description: '', maxMarks: 10 }],
+                  },
+                ])
+              }
             >
-              Next: Rubric →
+              + Question
             </Button>
           </div>
-        </div>
-      )}
-
-      {step === 1 && (
-        <div className="max-w-2xl">
-          <Card className="mb-6 border-dashed border-2 border-navy-200 bg-navy-50/40">
-            <div className="text-center py-2">
-              <p className="font-semibold text-navy-900 mb-1">Upload Exam Paper</p>
-              <p className="text-xs text-slate-500 mb-4">
-                PDF, Word (.docx) or Image → AI will extract questions, marks &
-                criteria
-              </p>
-
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp,application/pdf,image/*"
-                className="hidden"
-                onChange={handleFileUpload}
-                disabled={extracting}
-              />
-
-              <Button
-                size="sm"
-                variant="secondary"
-                onClick={() => fileInputRef.current?.click()}
-                disabled={extracting}
-                loading={extracting}
-              >
-                {extracting ? 'Extracting questions…' : 'Choose File to Extract'}
-              </Button>
-
-              {uploadedFileName && !extracting && (
-                <p className="text-xs text-emerald-600 mt-3">
-                  ✓ Extracted from:{' '}
-                  <span className="font-medium">{uploadedFileName}</span>
-                </p>
-              )}
-            </div>
-          </Card>
-
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <p className="text-sm text-slate-500">
-                Total marks:{' '}
-                <span className="font-semibold text-slate-900 font-mono">
-                  {totalRubricMarks}
-                </span>
-              </p>
-            </div>
-            <Button size="sm" variant="secondary" onClick={addQuestion}>
-              + Add Question
-            </Button>
-          </div>
-
-          <div className="space-y-5">
-            {questions.map((q, qi) => (
-              <Card key={q.id}>
-                <div className="flex items-start justify-between gap-3 mb-4">
-                  <div className="flex items-center gap-2">
-                    <div className="w-7 h-7 bg-navy-900 text-white rounded-lg flex items-center justify-center text-sm font-semibold shrink-0">
-                      {qi + 1}
-                    </div>
-                    <span className="font-medium text-slate-800">
-                      Question {q.number}
-                    </span>
-                    <Badge variant="muted" className="font-mono">
-                      {q.maxMarks} marks
-                    </Badge>
-                  </div>
-                  {questions.length > 1 && (
-                    <button
-                      onClick={() => removeQuestion(q.id)}
-                      className="text-xs text-red-500 hover:text-red-700 shrink-0"
-                    >
-                      Remove
-                    </button>
-                  )}
-                </div>
-
-                <div className="mb-4">
-                  <Textarea
-                    label="Question text *"
-                    placeholder="Enter the question as it appears on the exam paper…"
-                    rows={2}
-                    value={q.questionText}
-                    onChange={(e) =>
-                      updateQuestion(q.id, { questionText: e.target.value })
-                    }
-                  />
-                </div>
-
-                <div className="mb-3">
-                  <div className="flex items-center justify-between mb-2">
-                    <p className="text-sm font-medium text-slate-700">
-                      Marking Criteria
-                    </p>
-                    <button
-                      onClick={() => addCriterion(q.id)}
-                      className="text-xs text-navy-600 hover:text-navy-800"
-                    >
-                      + Add criterion
-                    </button>
-                  </div>
-                  <div className="space-y-2">
-                    {q.criteria.map((c, ci) => (
-                      <div
-                        key={c.id}
-                        className="flex items-start gap-2 bg-slate-50 rounded-lg p-2.5"
-                      >
-                        <div className="flex-1 grid grid-cols-1 sm:grid-cols-3 gap-2">
-                          <div className="sm:col-span-2">
-                            <input
-                              type="text"
-                              className="w-full h-8 px-2.5 text-xs rounded border border-slate-200 bg-white focus:outline-none focus:ring-1 focus:ring-navy-700"
-                              placeholder={`Criterion ${ci + 1} description…`}
-                              value={c.description}
-                              onChange={(e) =>
-                                updateCriterion(q.id, c.id, {
-                                  description: e.target.value,
-                                })
-                              }
-                            />
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            <input
-                              type="number"
-                              min="0"
-                              max="100"
-                              className="w-16 h-8 px-2 text-xs rounded border border-slate-200 bg-white focus:outline-none focus:ring-1 focus:ring-navy-700 font-mono text-center"
-                              value={c.maxMarks}
-                              onChange={(e) => {
-                                updateCriterion(q.id, c.id, {
-                                  maxMarks: parseInt(e.target.value) || 0,
-                                });
-                                setTimeout(() => syncQuestionMarks(q.id), 0);
-                              }}
-                            />
-                            <span className="text-xs text-slate-400">marks</span>
-                          </div>
-                        </div>
-                        {q.criteria.length > 1 && (
-                          <button
-                            onClick={() => removeCriterion(q.id, c.id)}
-                            className="text-slate-400 hover:text-red-500 text-xs mt-0.5 shrink-0"
-                          >
-                            ✕
-                          </button>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </Card>
-            ))}
-          </div>
-
-          <div className="flex gap-3 mt-5">
-            <Button variant="ghost" onClick={() => setStep(0)}>
-              ← Back
-            </Button>
-            <Button onClick={() => setStep(2)}>Next: Students →</Button>
-          </div>
-        </div>
-      )}
-
-      {step === 2 && (
-        <div className="max-w-xl">
-          <Card className="mb-5">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-slate-900">Enrol Students</h3>
-              <div className="flex items-center gap-3">
-                {studentList.length > 0 && (
+          {questions.map((q, qi) => (
+            <Card key={q.id} className="space-y-3">
+              <div className="flex justify-between">
+                <span className="font-medium">Q{qi + 1}</span>
+                {questions.length > 1 && (
                   <button
-                    onClick={toggleSelectAll}
-                    className="text-xs font-medium text-navy-600 hover:text-navy-800"
+                    type="button"
+                    className="text-xs text-red-500"
+                    onClick={() =>
+                      setQuestions((prev) => prev.filter((x) => x.id !== q.id))
+                    }
                   >
-                    {allSelected ? 'Deselect All' : 'Select All'}
+                    Remove
                   </button>
                 )}
-                <Badge variant="navy">{selectedStudents.length} selected</Badge>
               </div>
-            </div>
+              <Textarea
+                label="Question text"
+                rows={2}
+                value={q.questionText}
+                onChange={(e) =>
+                  setQuestions((prev) =>
+                    prev.map((x) =>
+                      x.id === q.id ? { ...x, questionText: e.target.value } : x
+                    )
+                  )
+                }
+              />
+              <Input
+                label="Max marks"
+                type="number"
+                value={q.maxMarks}
+                onChange={(e) =>
+                  setQuestions((prev) =>
+                    prev.map((x) =>
+                      x.id === q.id
+                        ? { ...x, maxMarks: parseInt(e.target.value, 10) || 0 }
+                        : x
+                    )
+                  )
+                }
+              />
+            </Card>
+          ))}
+          <div className="flex gap-3">
+            <Button variant="ghost" onClick={() => setFormStep(0)}>
+              ← Back
+            </Button>
+            <Button onClick={() => setFormStep(2)}>Next: Students →</Button>
+          </div>
+        </div>
+      )}
 
+      {formStep === 2 && (
+        <div className="max-w-xl space-y-4">
+          <Card>
+            <div className="flex justify-between mb-3">
+              <h3 className="font-semibold text-sm">Enrol Students</h3>
+              <Badge variant="navy">{selectedStudents.length}</Badge>
+            </div>
             {loadingStudents ? (
-              <p className="text-sm text-slate-500 py-6 text-center">
-                Loading students…
-              </p>
+              <p className="text-sm text-slate-400 text-center py-6">Loading…</p>
             ) : studentList.length === 0 ? (
-              <div className="py-8 text-center">
-                <p className="text-sm font-medium text-slate-700 mb-1">
-                  No students found
-                </p>
-                <p className="text-xs text-slate-500 max-w-xs mx-auto mb-4">
-                  Register at least one account with role <strong>Student</strong>{' '}
-                  from the Sign Up page. Then refresh this page.
-                </p>
-                <Button
-                  size="sm"
-                  variant="secondary"
-                  onClick={async () => {
-                    setLoadingStudents(true);
-                    const list = await loadStudentsFromCloud();
-                    setStudentList(list);
-                    setLoadingStudents(false);
-                    if (list.length === 0) {
-                      showToast(
-                        'Still no students. Please register a student account first.',
-                        'info'
-                      );
-                    }
-                  }}
-                >
-                  Refresh list
-                </Button>
-              </div>
+              <p className="text-sm text-slate-500 text-center py-6">No students found.</p>
             ) : (
-              <div className="space-y-2 max-h-80 overflow-y-auto">
-                {studentList.map((student) => (
+              <div className="space-y-2 max-h-72 overflow-y-auto">
+                {studentList.map((s) => (
                   <label
-                    key={student.id}
-                    className="flex items-center gap-3 p-3 rounded-lg border border-slate-200 cursor-pointer hover:bg-slate-50 transition-colors"
+                    key={s.id}
+                    className="flex items-center gap-3 p-3 rounded-lg border cursor-pointer hover:bg-slate-50"
                   >
                     <input
                       type="checkbox"
-                      checked={selectedStudents.includes(student.id)}
-                      onChange={() => toggleStudent(student.id)}
-                      className="w-4 h-4 rounded accent-navy-900"
+                      checked={selectedStudents.includes(s.id)}
+                      onChange={() =>
+                        setSelectedStudents((prev) =>
+                          prev.includes(s.id)
+                            ? prev.filter((x) => x !== s.id)
+                            : [...prev, s.id]
+                        )
+                      }
                     />
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm font-medium text-slate-800 truncate">
-                        {student.name}
-                      </p>
-                      <p className="text-xs text-slate-400 truncate">
-                        {student.email}
-                        {student.studentId ? ` · ${student.studentId}` : ''}
-                        {student.department ? ` · ${student.department}` : ''}
-                        {!student.calibrated && (
-                          <span className="ml-2 text-amber-600">
-                            · Not calibrated
-                          </span>
-                        )}
-                      </p>
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium truncate">{s.name}</p>
+                      <p className="text-xs text-slate-400 truncate">{s.email}</p>
                     </div>
                   </label>
                 ))}
               </div>
             )}
           </Card>
-
-          <Card className="mb-5 bg-navy-50 border-navy-200">
-            <h3 className="font-semibold text-navy-900 text-sm mb-3">
-              Exam Summary
-            </h3>
-            <dl className="text-sm space-y-1">
-              <div className="flex gap-2">
-                <dt className="text-navy-600 w-24 shrink-0">Title</dt>
-                <dd className="font-medium text-navy-900">{title}</dd>
-              </div>
-              <div className="flex gap-2">
-                <dt className="text-navy-600 w-24 shrink-0">Code</dt>
-                <dd className="font-medium text-navy-900">{code}</dd>
-              </div>
-              <div className="flex gap-2">
-                <dt className="text-navy-600 w-24 shrink-0">Date</dt>
-                <dd className="font-medium text-navy-900">{date}</dd>
-              </div>
-              <div className="flex gap-2">
-                <dt className="text-navy-600 w-24 shrink-0">Questions</dt>
-                <dd className="font-medium text-navy-900">{questions.length}</dd>
-              </div>
-              <div className="flex gap-2">
-                <dt className="text-navy-600 w-24 shrink-0">Max marks</dt>
-                <dd className="font-medium text-navy-900">{totalRubricMarks}</dd>
-              </div>
-              <div className="flex gap-2">
-                <dt className="text-navy-600 w-24 shrink-0">Students</dt>
-                <dd className="font-medium text-navy-900">
-                  {selectedStudents.length}
-                </dd>
-              </div>
-            </dl>
-          </Card>
-
           <div className="flex gap-3">
-            <Button variant="ghost" onClick={() => setStep(1)}>
+            <Button variant="ghost" onClick={() => setFormStep(1)}>
               ← Back
             </Button>
             <Button loading={saving} onClick={handleSave}>
@@ -767,29 +555,11 @@ export default function CreateExamPage() {
         title="Exam Created"
       >
         <div className="text-center py-4">
-          <div className="w-14 h-14 bg-emerald-100 rounded-full flex items-center justify-center text-emerald-600 text-3xl mx-auto mb-4">
-            ✓
-          </div>
-          <p className="font-semibold text-slate-900 mb-1">
-            &ldquo;{title}&rdquo; is live
-          </p>
-          <p className="text-sm text-slate-500 mb-5">
-            The exam has been created and {selectedStudents.length} student
-            {selectedStudents.length !== 1 ? 's' : ''} enrolled. Students can now
-            submit their answer sheets.
-          </p>
-          <div className="flex gap-3">
-            <Button
-              variant="secondary"
-              className="flex-1"
-              onClick={() => {
-                setSuccessModal(false);
-                navigate('/faculty');
-              }}
-            >
-              Go to Dashboard
-            </Button>
-          </div>
+          <p className="font-semibold mb-2">&ldquo;{title}&rdquo; is live</p>
+          <p className="text-xs text-slate-500 mb-4">{breadcrumbParts.join(' › ')}</p>
+          <Button className="w-full" onClick={() => navigate('/faculty')}>
+            Go to Dashboard
+          </Button>
         </div>
       </Modal>
     </PageContainer>

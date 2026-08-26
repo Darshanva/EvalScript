@@ -33,6 +33,7 @@ import UsagePage from './pages/admin/UsagePage';
 import AuditLogsPage from './pages/admin/AuditLogsPage';
 import SettingsPage from './pages/admin/SettingsPage';
 import GroqSetupPage from './pages/admin/GroqSetupPage';
+import ExamStructurePage from './pages/admin/ExamStructurePage';
 
 function NavigationBinder() {
   const navigate = useNavigate();
@@ -117,18 +118,25 @@ function AppRoutes() {
 
   return (
     <>
+      <NavigationBinder />
       <Routes>
         <Route
           path="/"
-          element={!currentUser ? <LandingPage /> : <Navigate to={home} replace />}
+          element={
+            !currentUser ? <LandingPage /> : <Navigate to={home} replace />
+          }
         />
         <Route
           path="/login"
-          element={!currentUser ? <AuthPage /> : <Navigate to={home} replace />}
+          element={
+            !currentUser ? <AuthPage /> : <Navigate to={home} replace />
+          }
         />
         <Route
           path="/auth"
-          element={!currentUser ? <AuthPage /> : <Navigate to={home} replace />}
+          element={
+            !currentUser ? <AuthPage /> : <Navigate to={home} replace />
+          }
         />
 
         <Route
@@ -257,6 +265,16 @@ function AppRoutes() {
             <ProtectedRoute roles={['admin']}>
               <AppLayout>
                 <UsersPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/structure"
+          element={
+            <ProtectedRoute roles={['admin']}>
+              <AppLayout>
+                <ExamStructurePage />
               </AppLayout>
             </ProtectedRoute>
           }
