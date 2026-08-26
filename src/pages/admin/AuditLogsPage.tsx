@@ -12,6 +12,8 @@ const ACTION_COLORS: Record<string, string> = {
   EXAM_CREATED: 'bg-purple-100 text-purple-700',
   CALIBRATION_UPLOADED: 'bg-slate-100 text-slate-700',
   RESULT_VIEWED: 'bg-slate-100 text-slate-500',
+  EXAM_CREATED: 'bg-purple-100 text-purple-700',
+  EXAM_DELETED: 'bg-red-100 text-red-700',
 };
 
 function formatDateTime(iso?: string): string {

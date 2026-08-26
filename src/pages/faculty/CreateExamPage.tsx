@@ -62,7 +62,6 @@ export default function CreateExamPage() {
   const { currentUser, users } = state;
   const [step, setStep] = useState<Step>(0);
 
-  // Exam fields
   const [title, setTitle] = useState('');
   const [code, setCode] = useState('');
   const [subject, setSubject] = useState('Computer Science');
@@ -70,7 +69,6 @@ export default function CreateExamPage() {
   const [duration, setDuration] = useState('180');
   const [description, setDescription] = useState('');
 
-  // Rubric
   const [questions, setQuestions] = useState<RubricQuestion[]>([
     {
       id: genId('rq'),
@@ -81,12 +79,10 @@ export default function CreateExamPage() {
     },
   ]);
 
-  // Upload state
   const [extracting, setExtracting] = useState(false);
   const [uploadedFileName, setUploadedFileName] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Students
   const [studentList, setStudentList] = useState<User[]>([]);
   const [loadingStudents, setLoadingStudents] = useState(true);
   const [selectedStudents, setSelectedStudents] = useState<string[]>([]);
@@ -94,7 +90,6 @@ export default function CreateExamPage() {
   const [saving, setSaving] = useState(false);
   const [successModal, setSuccessModal] = useState(false);
 
-  // Load students: context first, else cloud profiles
   useEffect(() => {
     let cancelled = false;
 
@@ -335,11 +330,17 @@ export default function CreateExamPage() {
     }
   }
 
+  // FIXED: define exam/rubric FIRST, then await createExam once
   async function handleSave() {
     if (!title || !code || !date) {
       showToast('Please fill in all required fields.', 'error');
       return;
     }
+    if (!currentUser) {
+      showToast('Not logged in', 'error');
+      return;
+    }
+
     setSaving(true);
 
     try {
@@ -348,18 +349,18 @@ export default function CreateExamPage() {
 
       const exam: Exam = {
         id: examId,
-        title,
-        code,
+        title: title.trim(),
+        code: code.trim().toUpperCase(),
         subject,
-        facultyId: currentUser!.id,
-        facultyName: currentUser!.name,
+        facultyId: currentUser.id,
+        facultyName: currentUser.name,
         date,
-        duration: parseInt(duration) || 180,
+        duration: parseInt(duration, 10) || 180,
         maxMarks: totalRubricMarks,
         status: 'ACTIVE',
         studentIds: selectedStudents,
         rubricId,
-        description,
+        description: description.trim(),
         createdAt: new Date().toISOString(),
       };
 
@@ -373,10 +374,12 @@ export default function CreateExamPage() {
 
       await createExam(exam);
       createRubric(rubric);
+
       setSuccessModal(true);
-    } catch (e) {
-      console.error(e);
-      showToast('Failed to create exam. Please try again.', 'error');
+      showToast('Exam saved successfully', 'success');
+    } catch (e: any) {
+      console.error('handleSave error', e);
+      showToast(e?.message || 'Exam save failed. Check console.', 'error');
     } finally {
       setSaving(false);
     }
@@ -388,6 +391,7 @@ export default function CreateExamPage() {
         title="Create New Exam"
         subtitle="Define the exam details, rubric, and enrol students."
         breadcrumb="Faculty"
+        showBack
         backTo="/faculty"
       />
 
@@ -398,7 +402,6 @@ export default function CreateExamPage() {
         />
       </div>
 
-      {/* Step 0: Exam details */}
       {step === 0 && (
         <div className="max-w-xl space-y-5">
           <Card>
@@ -463,7 +466,6 @@ export default function CreateExamPage() {
         </div>
       )}
 
-      {/* Step 1: Rubric */}
       {step === 1 && (
         <div className="max-w-2xl">
           <Card className="mb-6 border-dashed border-2 border-navy-200 bg-navy-50/40">
@@ -627,7 +629,6 @@ export default function CreateExamPage() {
         </div>
       )}
 
-      {/* Step 2: Students */}
       {step === 2 && (
         <div className="max-w-xl">
           <Card className="mb-5">
@@ -642,9 +643,7 @@ export default function CreateExamPage() {
                     {allSelected ? 'Deselect All' : 'Select All'}
                   </button>
                 )}
-                <Badge variant="navy">
-                  {selectedStudents.length} selected
-                </Badge>
+                <Badge variant="navy">{selectedStudents.length} selected</Badge>
               </div>
             </div>
 

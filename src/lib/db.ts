@@ -1,6 +1,5 @@
 import { supabase } from './supabase';
 import type { Submission, Evaluation, Exam, User, AuditLog } from '../types';
-import { DEMO_EXAMS } from './seed-data';
 
 export async function fetchProfile(userId: string): Promise<User | null> {
   const { data, error } = await supabase
@@ -191,43 +190,45 @@ export async function fetchExams(): Promise<Exam[]> {
 }
 
 export async function saveExam(exam: Exam) {
-  const { error } = await supabase.from('exams').upsert({
+  const row = {
     id: exam.id,
     title: exam.title,
     code: exam.code,
-    subject: exam.subject,
+    subject: exam.subject ?? null,
     faculty_id: exam.facultyId,
-    faculty_name: exam.facultyName,
-    max_marks: exam.maxMarks,
-    status: exam.status,
-    student_ids: exam.studentIds || [],
-    date: exam.date,
-    duration: exam.duration,
-    description: exam.description,
-    rubric_id: exam.rubricId,
-    created_at: exam.createdAt,
-  });
-  if (error) throw error;
+    faculty_name: exam.facultyName ?? null,
+    max_marks: exam.maxMarks ?? null,
+    status: exam.status ?? 'ACTIVE',
+    student_ids: exam.studentIds ?? [],
+    date: exam.date ?? null,
+    duration: exam.duration ?? null,
+    description: exam.description ?? null,
+    rubric_id: exam.rubricId ?? null,
+    created_at: exam.createdAt ?? new Date().toISOString(),
+  };
+
+  const { data, error } = await supabase.from('exams').upsert(row).select();
+
+  if (error) {
+    console.error('saveExam FAILED', error.message, error.details, error.hint);
+    throw new Error(error.message);
+  }
+
+  console.log('saveExam OK', data);
+  return data;
 }
 
 export async function deleteExam(examId: string) {
   const { error } = await supabase.from('exams').delete().eq('id', examId);
-  if (error) throw error;
+  if (error) {
+    console.error('deleteExam FAILED', error);
+    throw new Error(error.message);
+  }
 }
 
+/** No demo seed — only cloud exams */
 export async function ensureExamsSeeded(): Promise<Exam[]> {
-  const existing = await fetchExams();
-  if (existing.length > 0) return existing;
-
-  for (const exam of DEMO_EXAMS) {
-    try {
-      await saveExam(exam);
-    } catch (e) {
-      console.warn('seed exam failed', exam.id, e);
-    }
-  }
-  const after = await fetchExams();
-  return after.length ? after : DEMO_EXAMS;
+  return fetchExams();
 }
 
 export async function fetchAuditLogs(): Promise<AuditLog[]> {

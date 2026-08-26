@@ -22,11 +22,8 @@ import type {
   ResultVersion,
 } from '../types';
 import {
-  DEMO_RUBRICS,
-  DEMO_CALIBRATIONS,
   DEMO_AI_USAGE,
   DEFAULT_SYSTEM_SETTINGS,
-  DEMO_EXAMS,
 } from '../lib/seed-data';
 import { runDemoEvaluation } from '../lib/demo-ai';
 import { runClaudeEvaluation } from '../lib/claude-ai';
@@ -220,11 +217,11 @@ const initialState: AppState = {
   page: 'landing',
   navCtx: {},
   users: [],
-  exams: DEMO_EXAMS,
-  rubrics: DEMO_RUBRICS,
+  exams: [],
+  rubrics: [],
   submissions: [],
   evaluations: [],
-  calibrations: DEMO_CALIBRATIONS,
+  calibrations: [],
   auditLogs: [],
   aiUsage: DEMO_AI_USAGE,
   systemSettings: loadSavedSettings(),
@@ -301,7 +298,7 @@ async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
     payload: {
       submissions: subs,
       evaluations: evals,
-      exams: exams.length ? exams : DEMO_EXAMS,
+      exams: exams,
       users,
       auditLogs: logs,
     },
@@ -546,36 +543,54 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const createExam = useCallback(
     async (exam: Exam) => {
-      dispatch({ type: 'ADD_EXAM', exam });
       try {
         await saveExam(exam);
+        dispatch({ type: 'ADD_EXAM', exam });
+        if (state.currentUser) {
+          addAuditLog({
+            userId: state.currentUser.id,
+            userName: state.currentUser.name,
+            userRole: state.currentUser.role,
+            action: 'EXAM_CREATED',
+            entity: 'exam',
+            entityId: exam.id,
+            details: `Exam ${exam.code} (${exam.title}) created.`,
+          });
+        }
       } catch (e) {
         console.error(e);
-      }
-      if (state.currentUser) {
-        addAuditLog({
-          userId: state.currentUser.id,
-          userName: state.currentUser.name,
-          userRole: state.currentUser.role,
-          action: 'EXAM_CREATED',
-          entity: 'exam',
-          entityId: exam.id,
-          details: `Exam ${exam.code} (${exam.title}) created.`,
-        });
+        throw e;
       }
     },
     [state.currentUser, addAuditLog]
   );
 
-  const deleteExam = useCallback(async (examId: string) => {
-    dispatch({ type: 'DELETE_EXAM', examId });
-    try {
-      await deleteExamFromDb(examId);
-    } catch (e) {
-      console.error('Failed to delete exam from cloud', e);
-      throw e;
-    }
-  }, []);
+  const deleteExam = useCallback(
+    async (examId: string) => {
+      const exam = state.exams.find((e) => e.id === examId);
+      try {
+        await deleteExamFromDb(examId);
+        dispatch({ type: 'DELETE_EXAM', examId });
+        if (state.currentUser) {
+          addAuditLog({
+            userId: state.currentUser.id,
+            userName: state.currentUser.name,
+            userRole: state.currentUser.role,
+            action: 'EXAM_DELETED',
+            entity: 'exam',
+            entityId: examId,
+            details: exam
+              ? `Exam ${exam.code} (${exam.title}) deleted.`
+              : `Exam ${examId} deleted.`,
+          });
+        }
+      } catch (e) {
+        console.error('Failed to delete exam', e);
+        throw e;
+      }
+    },
+    [state.exams, state.currentUser, addAuditLog]
+  );
 
   const createRubric = useCallback((rubric: Rubric) => {
     dispatch({ type: 'ADD_RUBRIC', rubric });
