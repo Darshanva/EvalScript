@@ -15,11 +15,10 @@ import type { Exam, Rubric, RubricQuestion, User } from '../../types';
 import { supabase } from '../../lib/supabase';
 import {
   loadExamTree,
-  saveExamTree,
   getItemsAtLevel,
-  addTreeItem,
   EMPTY_PATH,
   LEVEL_TITLES,
+  pathFromCrumbs,
   type TreeLevel,
   type TreePath,
 } from '../../lib/exam-tree';
@@ -66,11 +65,10 @@ export default function CreateExamPage() {
   const navigate = useNavigate();
   const { currentUser, users } = state;
 
-  const [tree, setTree] = useState(loadExamTree);
+  const [tree, setTree] = useState<Record<string, any>>({});
+  const [treeLoading, setTreeLoading] = useState(true);
   const [level, setLevel] = useState<Level>('vertical');
   const [path, setPath] = useState<TreePath>({ ...EMPTY_PATH });
-  const [adding, setAdding] = useState(false);
-  const [newName, setNewName] = useState('');
 
   const [title, setTitle] = useState('');
   const [code, setCode] = useState('');
@@ -94,9 +92,26 @@ export default function CreateExamPage() {
   const [successModal, setSuccessModal] = useState(false);
   const [formStep, setFormStep] = useState<0 | 1 | 2>(0);
 
+  // Load shared tree (admin updates → faculty sees)
   useEffect(() => {
-    saveExamTree(tree);
-  }, [tree]);
+    let cancelled = false;
+    async function refresh() {
+      const t = await loadExamTree();
+      if (!cancelled) {
+        setTree(t);
+        setTreeLoading(false);
+      }
+    }
+    refresh();
+    const onUpd = () => refresh();
+    window.addEventListener('exam-tree-updated', onUpd);
+    window.addEventListener('storage', onUpd);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('exam-tree-updated', onUpd);
+      window.removeEventListener('storage', onUpd);
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -125,9 +140,10 @@ export default function CreateExamPage() {
   if (!currentUser) return null;
 
   const totalRubricMarks = questions.reduce((s, q) => s + (q.maxMarks || 0), 0);
-  const treeLevel = level === 'form' ? 'subject' : level;
+  const treeLevel: TreeLevel =
+    level === 'form' ? 'subject' : (level as TreeLevel);
   const items =
-    level === 'form' ? [] : getItemsAtLevel(tree, treeLevel as TreeLevel, path);
+    level === 'form' ? [] : getItemsAtLevel(tree, treeLevel, path);
 
   const breadcrumbParts = [
     path.vertical,
@@ -136,6 +152,14 @@ export default function CreateExamPage() {
     path.term,
     path.section,
     path.subject,
+  ].filter(Boolean);
+
+  const crumbsForJump = [
+    path.vertical,
+    path.org,
+    path.batch,
+    path.term,
+    path.section,
   ].filter(Boolean);
 
   function openItem(name: string) {
@@ -162,9 +186,18 @@ export default function CreateExamPage() {
     }
   }
 
+  function jumpCrumb(index: number) {
+    if (index < 0) {
+      setPath({ ...EMPTY_PATH });
+      setLevel('vertical');
+      return;
+    }
+    const { path: p, level: lv } = pathFromCrumbs(crumbsForJump, index);
+    setPath(p);
+    setLevel(lv);
+  }
+
   function goBack() {
-    setAdding(false);
-    setNewName('');
     if (level === 'form') {
       setLevel('subject');
       return;
@@ -197,15 +230,6 @@ export default function CreateExamPage() {
     navigate('/faculty');
   }
 
-  function handleAdd() {
-    const name = newName.trim();
-    if (!name || level === 'form') return;
-    setTree((prev) => addTreeItem(prev, level as TreeLevel, path, name));
-    setNewName('');
-    setAdding(false);
-    showToast(`Added "${name}"`, 'success');
-  }
-
   async function handleSave() {
     if (!title || !code || !date) {
       showToast('Fill title, code and date', 'error');
@@ -230,7 +254,10 @@ export default function CreateExamPage() {
         status: 'ACTIVE',
         studentIds: selectedStudents,
         rubricId,
-        description: [description.trim(), hierarchyPath ? `Path: ${hierarchyPath}` : '']
+        description: [
+          description.trim(),
+          hierarchyPath ? `Path: ${hierarchyPath}` : '',
+        ]
           .filter(Boolean)
           .join('\n'),
         createdAt: new Date().toISOString(),
@@ -256,75 +283,61 @@ export default function CreateExamPage() {
     }
   }
 
+  // ——— Hierarchy browser (NO add / delete) ———
   if (level !== 'form') {
     return (
       <PageContainer>
         <PageHeader
-          title={LEVEL_TITLES[level as TreeLevel] || 'Select'}
-          subtitle="Tap a card to open next level. + to add."
+          title={
+            level === 'vertical'
+              ? 'Select Vertical / Client'
+              : LEVEL_TITLES[level as TreeLevel]
+          }
+          subtitle="Browse structure set by Admin. Tap a card to open next level."
           breadcrumb="Faculty"
           showBack
           backTo="/faculty"
         />
 
-        {breadcrumbParts.length > 0 && (
-          <div className="mb-4 flex flex-wrap items-center gap-1 text-sm text-slate-500">
-            <button
-              type="button"
-              className="text-navy-600 hover:underline"
-              onClick={() => {
-                setPath({ ...EMPTY_PATH });
-                setLevel('vertical');
-              }}
-            >
-              Root
-            </button>
-            {breadcrumbParts.map((part, i) => (
-              <span key={i} className="flex items-center gap-1">
-                <span className="text-slate-300">›</span>
-                <span className="font-medium text-slate-700">{part}</span>
-              </span>
-            ))}
-          </div>
-        )}
+        <div className="mb-4 flex flex-wrap items-center gap-1 text-sm text-slate-500">
+          <button
+            type="button"
+            className="text-navy-600 hover:underline"
+            onClick={() => jumpCrumb(-1)}
+          >
+            Root
+          </button>
+          {crumbsForJump.map((part, i) => (
+            <span key={i} className="flex items-center gap-1">
+              <span className="text-slate-300">›</span>
+              <button
+                type="button"
+                className="font-medium text-navy-700 hover:underline"
+                onClick={() => jumpCrumb(i)}
+              >
+                {part}
+              </button>
+            </span>
+          ))}
+        </div>
 
-        <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center mb-4">
           <Button variant="ghost" size="sm" onClick={goBack}>
             ← Back
           </Button>
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => {
-              setAdding(true);
-              setNewName('');
-            }}
-          >
-            + Add {LEVEL_TITLES[level as TreeLevel]}
-          </Button>
         </div>
 
-        {adding && (
-          <Card className="mb-4 flex flex-col sm:flex-row gap-3 items-end">
-            <div className="flex-1 w-full">
-              <Input
-                label="Name"
-                value={newName}
-                onChange={(e) => setNewName(e.target.value)}
-                placeholder="Name…"
-              />
-            </div>
-            <Button onClick={handleAdd}>Add</Button>
-            <Button variant="ghost" onClick={() => setAdding(false)}>
-              Cancel
-            </Button>
-          </Card>
-        )}
-
-        {items.length === 0 ? (
+        {treeLoading ? (
           <Card>
             <p className="text-sm text-slate-500 text-center py-10">
-              Empty. Use + Add.
+              Loading structure…
+            </p>
+          </Card>
+        ) : items.length === 0 ? (
+          <Card>
+            <p className="text-sm text-slate-500 text-center py-10">
+              Nothing here. Ask Admin to add items under{' '}
+              <strong>Exam Structure</strong>.
             </p>
           </Card>
         ) : (
@@ -346,6 +359,7 @@ export default function CreateExamPage() {
     );
   }
 
+  // ——— Exam form ———
   return (
     <PageContainer>
       <PageHeader
@@ -355,6 +369,36 @@ export default function CreateExamPage() {
         showBack
         backTo="/faculty"
       />
+
+      <div className="mb-4 flex flex-wrap items-center gap-1 text-sm text-slate-500">
+        <button
+          type="button"
+          className="text-navy-600 hover:underline"
+          onClick={() => jumpCrumb(-1)}
+        >
+          Root
+        </button>
+        {crumbsForJump.map((part, i) => (
+          <span key={i} className="flex items-center gap-1">
+            <span className="text-slate-300">›</span>
+            <button
+              type="button"
+              className="font-medium text-navy-700 hover:underline"
+              onClick={() => {
+                jumpCrumb(i);
+              }}
+            >
+              {part}
+            </button>
+          </span>
+        ))}
+        {path.subject && (
+          <span className="flex items-center gap-1">
+            <span className="text-slate-300">›</span>
+            <span className="font-medium text-slate-700">{path.subject}</span>
+          </span>
+        )}
+      </div>
 
       <Button variant="ghost" size="sm" className="mb-4" onClick={goBack}>
         ← Back to subjects
@@ -367,7 +411,9 @@ export default function CreateExamPage() {
             type="button"
             onClick={() => setFormStep(i as 0 | 1 | 2)}
             className={`px-3 py-1.5 rounded-full ${
-              formStep === i ? 'bg-navy-900 text-white' : 'bg-slate-100 text-slate-600'
+              formStep === i
+                ? 'bg-navy-900 text-white'
+                : 'bg-slate-100 text-slate-600'
             }`}
           >
             {i + 1}. {label}
@@ -378,7 +424,11 @@ export default function CreateExamPage() {
       {formStep === 0 && (
         <div className="max-w-xl space-y-4">
           <Card className="space-y-4">
-            <Input label="Exam Title *" value={title} onChange={(e) => setTitle(e.target.value)} />
+            <Input
+              label="Exam Title *"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+            />
             <div className="grid grid-cols-2 gap-4">
               <Input
                 label="Exam Code *"
@@ -412,8 +462,14 @@ export default function CreateExamPage() {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
+            <p className="text-xs text-slate-400">
+              Path: {breadcrumbParts.join(' › ') || '—'}
+            </p>
           </Card>
-          <Button disabled={!title || !code || !date} onClick={() => setFormStep(1)}>
+          <Button
+            disabled={!title || !code || !date}
+            onClick={() => setFormStep(1)}
+          >
             Next: Rubric →
           </Button>
         </div>
@@ -421,9 +477,10 @@ export default function CreateExamPage() {
 
       {formStep === 1 && (
         <div className="max-w-2xl space-y-4">
-          <div className="flex justify-between">
+          <div className="flex justify-between items-center">
             <p className="text-sm text-slate-500">
-              Total: <span className="font-mono font-semibold">{totalRubricMarks}</span>
+              Total marks:{' '}
+              <span className="font-mono font-semibold">{totalRubricMarks}</span>
             </p>
             <Button
               size="sm"
@@ -436,7 +493,9 @@ export default function CreateExamPage() {
                     number: String(prev.length + 1),
                     questionText: '',
                     maxMarks: 10,
-                    criteria: [{ id: genId('rc'), description: '', maxMarks: 10 }],
+                    criteria: [
+                      { id: genId('rc'), description: '', maxMarks: 10 },
+                    ],
                   },
                 ])
               }
@@ -467,7 +526,9 @@ export default function CreateExamPage() {
                 onChange={(e) =>
                   setQuestions((prev) =>
                     prev.map((x) =>
-                      x.id === q.id ? { ...x, questionText: e.target.value } : x
+                      x.id === q.id
+                        ? { ...x, questionText: e.target.value }
+                        : x
                     )
                   )
                 }
@@ -480,7 +541,10 @@ export default function CreateExamPage() {
                   setQuestions((prev) =>
                     prev.map((x) =>
                       x.id === q.id
-                        ? { ...x, maxMarks: parseInt(e.target.value, 10) || 0 }
+                        ? {
+                            ...x,
+                            maxMarks: parseInt(e.target.value, 10) || 0,
+                          }
                         : x
                     )
                   )
@@ -502,18 +566,20 @@ export default function CreateExamPage() {
           <Card>
             <div className="flex justify-between mb-3">
               <h3 className="font-semibold text-sm">Enrol Students</h3>
-              <Badge variant="navy">{selectedStudents.length}</Badge>
+              <Badge variant="navy">{selectedStudents.length} selected</Badge>
             </div>
             {loadingStudents ? (
               <p className="text-sm text-slate-400 text-center py-6">Loading…</p>
             ) : studentList.length === 0 ? (
-              <p className="text-sm text-slate-500 text-center py-6">No students found.</p>
+              <p className="text-sm text-slate-500 text-center py-6">
+                No students found.
+              </p>
             ) : (
               <div className="space-y-2 max-h-72 overflow-y-auto">
                 {studentList.map((s) => (
                   <label
                     key={s.id}
-                    className="flex items-center gap-3 p-3 rounded-lg border cursor-pointer hover:bg-slate-50"
+                    className="flex items-center gap-3 p-3 rounded-lg border border-slate-200 cursor-pointer hover:bg-slate-50"
                   >
                     <input
                       type="checkbox"
@@ -555,9 +621,19 @@ export default function CreateExamPage() {
         title="Exam Created"
       >
         <div className="text-center py-4">
-          <p className="font-semibold mb-2">&ldquo;{title}&rdquo; is live</p>
-          <p className="text-xs text-slate-500 mb-4">{breadcrumbParts.join(' › ')}</p>
-          <Button className="w-full" onClick={() => navigate('/faculty')}>
+          <p className="font-semibold text-slate-900 mb-2">
+            &ldquo;{title}&rdquo; is live
+          </p>
+          <p className="text-xs text-slate-500 mb-4">
+            {breadcrumbParts.join(' › ')}
+          </p>
+          <Button
+            className="w-full"
+            onClick={() => {
+              setSuccessModal(false);
+              navigate('/faculty');
+            }}
+          >
             Go to Dashboard
           </Button>
         </div>

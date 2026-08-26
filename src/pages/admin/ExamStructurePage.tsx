@@ -10,6 +10,7 @@ import {
   deleteTreeItem,
   EMPTY_PATH,
   LEVEL_TITLES,
+  pathFromCrumbs,
   type TreeLevel,
   type TreePath,
 } from '../../lib/exam-tree';
@@ -19,18 +20,21 @@ export default function ExamStructurePage() {
   const navigate = useNavigate();
   const { showToast } = useApp();
 
-  const [tree, setTree] = useState(loadExamTree);
+  const [tree, setTree] = useState<Record<string, any>>({});
+  const [loading, setLoading] = useState(true);
   const [level, setLevel] = useState<TreeLevel>('vertical');
   const [path, setPath] = useState<TreePath>({ ...EMPTY_PATH });
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState('');
 
   useEffect(() => {
-    saveExamTree(tree);
-  }, [tree]);
+    loadExamTree().then((t) => {
+      setTree(t);
+      setLoading(false);
+    });
+  }, []);
 
   const items = getItemsAtLevel(tree, level, path);
-
   const crumbs = [
     path.vertical,
     path.org,
@@ -58,9 +62,20 @@ export default function ExamStructurePage() {
     }
   }
 
+  function jumpCrumb(index: number) {
+    // index -1 = root
+    if (index < 0) {
+      setPath({ ...EMPTY_PATH });
+      setLevel('vertical');
+      return;
+    }
+    const { path: p, level: lv } = pathFromCrumbs(crumbs, index);
+    setPath(p);
+    setLevel(lv);
+  }
+
   function goBack() {
     setAdding(false);
-    setNewName('');
     if (level === 'subject') {
       setPath((p) => ({ ...p, section: '' }));
       setLevel('section');
@@ -76,62 +91,70 @@ export default function ExamStructurePage() {
     } else if (level === 'org') {
       setPath({ ...EMPTY_PATH });
       setLevel('vertical');
-    } else {
-      navigate('/admin');
-    }
+    } else navigate('/admin');
   }
 
-  function handleAdd() {
+  async function handleAdd() {
     const name = newName.trim();
     if (!name) {
       showToast('Enter a name', 'error');
       return;
     }
-    setTree((prev) => addTreeItem(prev, level, path, name));
+    const next = addTreeItem(tree, level, path, name);
+    setTree(next);
+    await saveExamTree(next);
     setNewName('');
     setAdding(false);
     showToast(`Added "${name}"`, 'success');
   }
 
-  function handleDelete(name: string) {
-    const ok = window.confirm(
-      `Delete "${name}" and everything under it? This cannot be undone.`
-    );
-    if (!ok) return;
-    setTree((prev) => deleteTreeItem(prev, level, path, name));
+  async function handleDelete(name: string) {
+    if (!window.confirm(`Delete "${name}" and everything under it?`)) return;
+    const next = deleteTreeItem(tree, level, path, name);
+    setTree(next);
+    await saveExamTree(next);
     showToast(`Deleted "${name}"`, 'success');
+  }
+
+  if (loading) {
+    return (
+      <PageContainer>
+        <p className="text-sm text-slate-500">Loading structure…</p>
+      </PageContainer>
+    );
   }
 
   return (
     <PageContainer>
       <PageHeader
         title="Exam Structure"
-        subtitle="Manage Vertical → Org → Batch → Term → Section → Subject. Same tree faculty uses when creating exams."
+        subtitle="Add / delete folders. Faculty only browses this tree when creating exams."
         breadcrumb="Admin"
         showBack
         backTo="/admin"
       />
 
-      {crumbs.length > 0 && (
-        <div className="mb-4 flex flex-wrap items-center gap-1 text-sm text-slate-500">
-          <button
-            type="button"
-            className="text-navy-600 hover:underline"
-            onClick={() => {
-              setPath({ ...EMPTY_PATH });
-              setLevel('vertical');
-            }}
-          >
-            Root
-          </button>
-          {crumbs.map((c, i) => (
-            <span key={i} className="flex items-center gap-1">
-              <span className="text-slate-300">›</span>
-              <span className="font-medium text-slate-700">{c}</span>
-            </span>
-          ))}
-        </div>
-      )}
+      <div className="mb-4 flex flex-wrap items-center gap-1 text-sm text-slate-500">
+        <button
+          type="button"
+          className="text-navy-600 hover:underline"
+          onClick={() => jumpCrumb(-1)}
+        >
+          Root
+        </button>
+        {crumbs.map((c, i) => (
+          <span key={i} className="flex items-center gap-1">
+            <span className="text-slate-300">›</span>
+            <button
+              type="button"
+              className="font-medium text-navy-700 hover:underline"
+              onClick={() => jumpCrumb(i)}
+            >
+              {c}
+            </button>
+          </span>
+        ))}
+      </div>
 
       <div className="flex items-center justify-between mb-4 gap-3 flex-wrap">
         <div className="flex items-center gap-2">
@@ -139,7 +162,7 @@ export default function ExamStructurePage() {
             ← Back
           </Button>
           <Badge variant="muted">{LEVEL_TITLES[level]}</Badge>
-          <Badge variant="navy">{items.length} items</Badge>
+          <Badge variant="navy">{items.length}</Badge>
         </div>
         <Button
           size="sm"
@@ -161,9 +184,6 @@ export default function ExamStructurePage() {
               value={newName}
               onChange={(e) => setNewName(e.target.value)}
               placeholder={`New ${LEVEL_TITLES[level]}…`}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') handleAdd();
-              }}
             />
           </div>
           <Button onClick={handleAdd}>Add</Button>
@@ -176,7 +196,7 @@ export default function ExamStructurePage() {
       {items.length === 0 ? (
         <Card>
           <p className="text-sm text-slate-500 text-center py-10">
-            Empty. Click <strong>+ Add {LEVEL_TITLES[level]}</strong>.
+            Empty. Click + Add.
           </p>
         </Card>
       ) : (
@@ -184,19 +204,17 @@ export default function ExamStructurePage() {
           {items.map((name) => (
             <div
               key={name}
-              className="p-4 rounded-xl border-2 border-slate-200 bg-white hover:border-navy-300 transition-all flex flex-col gap-3"
+              className="p-4 rounded-xl border-2 border-slate-200 bg-white flex flex-col gap-3"
             >
               <button
                 type="button"
                 className="text-left flex-1"
-                onClick={() => {
-                  if (level !== 'subject') openItem(name);
-                }}
+                onClick={() => level !== 'subject' && openItem(name)}
                 disabled={level === 'subject'}
               >
                 <p className="font-semibold text-slate-900">{name}</p>
                 <p className="text-xs text-slate-400 mt-1">
-                  {level === 'subject' ? 'Subject leaf' : 'Open →'}
+                  {level === 'subject' ? 'Leaf' : 'Open →'}
                 </p>
               </button>
               <div className="flex gap-2">
@@ -223,14 +241,6 @@ export default function ExamStructurePage() {
           ))}
         </div>
       )}
-
-      <Card className="mt-6 bg-slate-50 border-slate-200">
-        <p className="text-xs text-slate-500">
-          This structure is stored in the browser (localStorage) and shared with
-          Faculty → Create Exam hierarchy. Faculty sees the same folders when
-          creating exams.
-        </p>
-      </Card>
     </PageContainer>
   );
 }
