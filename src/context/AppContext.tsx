@@ -29,6 +29,7 @@ import {
   DEMO_EXAMS,
 } from '../lib/seed-data';
 import { runDemoEvaluation } from '../lib/demo-ai';
+import { runClaudeEvaluation } from '../lib/claude-ai';
 import { supabase } from '../lib/supabase';
 import {
   ensureProfile,
@@ -200,7 +201,14 @@ function appReducer(state: AppState, action: AppAction): AppState {
 function loadSavedSettings(): SystemSettings {
   try {
     const raw = localStorage.getItem('evalscript_system_settings');
-    if (raw) return { ...DEFAULT_SYSTEM_SETTINGS, ...JSON.parse(raw) };
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      return {
+        ...DEFAULT_SYSTEM_SETTINGS,
+        ...parsed,
+        claudeModel: parsed.claudeModel || 'claude-sonnet-4-20250514',
+      };
+    }
   } catch {
     /* ignore */
   }
@@ -217,7 +225,7 @@ const initialState: AppState = {
   submissions: [],
   evaluations: [],
   calibrations: DEMO_CALIBRATIONS,
-  auditLogs: [], // real only — no demo seed
+  auditLogs: [],
   aiUsage: DEMO_AI_USAGE,
   systemSettings: loadSavedSettings(),
   disputes: [],
@@ -384,17 +392,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
     saveAuditLog(fullLog).catch(console.error);
   }, []);
 
-  const submitExam = useCallback(
-    async (submission: Submission) => {
-      dispatch({ type: 'ADD_SUBMISSION', submission });
-      try {
-        await saveSubmission(submission);
-      } catch (e) {
-        console.error(e);
-      }
-    },
-    []
-  );
+  const submitExam = useCallback(async (submission: Submission) => {
+    dispatch({ type: 'ADD_SUBMISSION', submission });
+    try {
+      await saveSubmission(submission);
+    } catch (e) {
+      console.error(e);
+    }
+  }, []);
 
   const processEvaluation = useCallback(
     (submissionId: string) => {
@@ -407,29 +412,89 @@ export function AppProvider({ children }: { children: ReactNode }) {
       dispatch({ type: 'UPDATE_SUBMISSION_STATUS', submissionId, status: 'PROCESSING' });
       updateSubmissionStatus(submissionId, 'PROCESSING').catch(console.error);
 
-      setTimeout(async () => {
-        const evaluation = runDemoEvaluation({
-          submission,
-          rubric,
-          examTitle: `${exam.title} (${exam.code})`,
-          studentName: submission.studentName || 'Student',
-        });
-        dispatch({ type: 'ADD_EVALUATION', evaluation });
-        dispatch({ type: 'UPDATE_SUBMISSION_STATUS', submissionId, status: 'AI_COMPLETE' });
-        dispatch({
-          type: 'UPDATE_SUBMISSION_EVALUATION_ID',
-          submissionId,
-          evaluationId: evaluation.id,
-        });
+      const calibration = state.calibrations.find(
+        (c) => c.studentId === submission.studentId
+      );
+
+      const useClaude =
+        state.systemSettings.aiMode === 'claude' ||
+        state.systemSettings.aiProvider === 'claude' ||
+        state.systemSettings.aiMode === 'groq';
+
+      (async () => {
         try {
-          await saveEvaluation(evaluation);
-          await updateSubmissionStatus(submissionId, 'AI_COMPLETE', evaluation.id);
+          let evaluation: Evaluation;
+
+          if (useClaude) {
+            evaluation = await runClaudeEvaluation({
+              submission,
+              rubric,
+              examTitle: `${exam.title} (${exam.code})`,
+              studentName: submission.studentName || 'Student',
+              calibrationImageUrl: calibration?.imageUrl,
+            });
+          } else {
+            evaluation = runDemoEvaluation({
+              submission,
+              rubric,
+              examTitle: `${exam.title} (${exam.code})`,
+              studentName: submission.studentName || 'Student',
+            });
+          }
+
+          dispatch({ type: 'ADD_EVALUATION', evaluation });
+          dispatch({
+            type: 'UPDATE_SUBMISSION_STATUS',
+            submissionId,
+            status: 'AI_COMPLETE',
+          });
+          dispatch({
+            type: 'UPDATE_SUBMISSION_EVALUATION_ID',
+            submissionId,
+            evaluationId: evaluation.id,
+          });
+
+          try {
+            await saveEvaluation(evaluation);
+            await updateSubmissionStatus(
+              submissionId,
+              'AI_COMPLETE',
+              evaluation.id
+            );
+          } catch (e) {
+            console.error(e);
+          }
+
+          if (state.currentUser) {
+            addAuditLog({
+              userId: state.currentUser.id,
+              userName: state.currentUser.name,
+              userRole: state.currentUser.role,
+              action: 'AI_EVALUATION_COMPLETE',
+              entity: 'evaluation',
+              entityId: evaluation.id,
+              details: `AI scored ${evaluation.totalMarks}/${evaluation.maxMarks} for ${evaluation.studentName}.`,
+            });
+          }
         } catch (e) {
           console.error(e);
+          dispatch({
+            type: 'UPDATE_SUBMISSION_STATUS',
+            submissionId,
+            status: 'SUBMITTED',
+          });
         }
-      }, 2500);
+      })();
     },
-    [state.submissions, state.exams, state.rubrics]
+    [
+      state.submissions,
+      state.exams,
+      state.rubrics,
+      state.calibrations,
+      state.systemSettings,
+      state.currentUser,
+      addAuditLog,
+    ]
   );
 
   const updateEvaluation = useCallback(async (evaluation: Evaluation) => {

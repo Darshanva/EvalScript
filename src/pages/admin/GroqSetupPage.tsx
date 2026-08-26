@@ -4,24 +4,24 @@ import { useApp } from '../../context/AppContext';
 import { Button, Card, Badge } from '../../components/ui';
 import { PageContainer, PageHeader } from '../../components/Layout';
 
-const GROQ_MODELS = [
+const CLAUDE_MODELS = [
   {
-    id: 'llama-3.2-90b-vision-preview',
-    name: 'Llama 3.2 90B Vision',
+    id: 'claude-sonnet-4-20250514',
+    name: 'Claude Sonnet 4',
     recommended: true,
-    notes: 'Best accuracy for handwriting',
+    notes: 'Best balance for handwriting + scoring',
   },
   {
-    id: 'llama-3.2-11b-vision-preview',
-    name: 'Llama 3.2 11B Vision',
+    id: 'claude-opus-4-20250514',
+    name: 'Claude Opus 4',
     recommended: false,
-    notes: 'Faster, lower cost',
+    notes: 'Highest quality, slower / costlier',
   },
   {
-    id: 'llava-v1.5-7b-4096-tokens',
-    name: 'LLaVA 1.5 7B',
+    id: 'claude-3-5-sonnet-20241022',
+    name: 'Claude 3.5 Sonnet',
     recommended: false,
-    notes: 'Legacy option',
+    notes: 'Previous generation vision',
   },
 ];
 
@@ -34,11 +34,14 @@ export default function GroqSetupPage() {
   return (
     <PageContainer>
       <PageHeader
-        title="Groq API Setup"
-        subtitle="Connect real handwriting evaluation (server-side key required)."
+        title="Claude API Setup"
+        subtitle="Real handwriting evaluation via Anthropic Claude (server-side key)."
         breadcrumb="Admin"
         action={
-          <Button variant="secondary" onClick={() => navigate('/admin/settings')}>
+          <Button
+            variant="secondary"
+            onClick={() => navigate('/admin/settings')}
+          >
             Go to Settings →
           </Button>
         }
@@ -50,12 +53,12 @@ export default function GroqSetupPage() {
             <p className="font-semibold text-slate-900">Current AI Mode</p>
             <p className="text-sm text-slate-500 mt-0.5">
               {isDemo
-                ? 'Demo mode — simulated scores. Switch to Groq in Settings after adding a server key.'
-                : 'Groq mode selected — ensure GROQ_API_KEY is set on the server/backend.'}
+                ? 'Demo mode — simulated scores. Switch to Claude in Settings after backend key is set.'
+                : 'Claude mode selected — backend must have ANTHROPIC_API_KEY.'}
             </p>
           </div>
           <Badge variant={isDemo ? 'warning' : 'success'} className="shrink-0">
-            {isDemo ? 'Demo Mode' : 'Groq Selected'}
+            {isDemo ? 'Demo Mode' : 'Claude Selected'}
           </Badge>
         </div>
       </Card>
@@ -66,23 +69,23 @@ export default function GroqSetupPage() {
           {[
             {
               step: 1,
-              title: 'Create a Groq Account',
-              desc: 'Sign up at console.groq.com.',
+              title: 'Anthropic account',
+              desc: 'Create account at console.anthropic.com and generate an API key.',
             },
             {
               step: 2,
-              title: 'Generate an API Key',
-              desc: 'API Keys → Create. Key starts with gsk_.',
+              title: 'Backend env only',
+              desc: 'On Render (or your API server) set ANTHROPIC_API_KEY=sk-ant-... Never put this in the Vite app.',
             },
             {
               step: 3,
-              title: 'Add to server env only',
-              desc: 'Vercel / backend: GROQ_API_KEY. Never put the key in frontend code.',
+              title: 'Eval endpoint',
+              desc: 'Backend POST /api/evaluate should accept pageUrls + rubric and call Claude Vision.',
             },
             {
               step: 4,
               title: 'Switch mode',
-              desc: 'Admin → Settings → AI Mode = Groq → Save.',
+              desc: 'Admin → Settings → AI Mode = Production (Claude) → Save.',
             },
           ].map(({ step, title, desc }) => (
             <div key={step} className="flex gap-4">
@@ -98,8 +101,8 @@ export default function GroqSetupPage() {
         </div>
 
         <div className="space-y-4">
-          <h2 className="font-semibold text-slate-900">Supported Vision Models</h2>
-          {GROQ_MODELS.map((m) => (
+          <h2 className="font-semibold text-slate-900">Models</h2>
+          {CLAUDE_MODELS.map((m) => (
             <Card
               key={m.id}
               className={m.recommended ? 'border-navy-300 bg-navy-50' : ''}
@@ -113,7 +116,7 @@ export default function GroqSetupPage() {
                   <p className="text-xs text-slate-500 font-mono mt-0.5">{m.id}</p>
                   <p className="text-xs text-slate-500 mt-1">{m.notes}</p>
                 </div>
-                {systemSettings?.groqModel === m.id && (
+                {(systemSettings?.claudeModel || '') === m.id && (
                   <Badge variant="success" className="shrink-0">
                     Active
                   </Badge>
@@ -130,9 +133,9 @@ export default function GroqSetupPage() {
           <div>
             <p className="font-semibold text-red-900 text-sm">Security</p>
             <ul className="text-sm text-red-700 mt-2 space-y-1 list-disc list-inside">
-              <li>Never expose GROQ_API_KEY in browser / Vite client code.</li>
-              <li>Call Groq only from a backend (API route / Edge Function).</li>
-              <li>Do not commit .env files with secrets.</li>
+              <li>Never expose ANTHROPIC_API_KEY in browser or GitHub.</li>
+              <li>Call Claude only from Render / Edge Function / API route.</li>
+              <li>Frontend only calls your backend URL (VITE_CLAUDE_EVAL_URL).</li>
             </ul>
           </div>
         </div>

@@ -30,7 +30,7 @@ const ADMIN_NAV: NavItem[] = [
   { path: '/admin/users', label: 'Users', icon: '⋯' },
   { path: '/admin/usage', label: 'AI Usage', icon: '≋' },
   { path: '/admin/audit', label: 'Audit Logs', icon: '☰' },
-  { path: '/admin/groq', label: 'Groq Setup', icon: '⚡' },
+  { path: '/admin/groq', label: 'Claude Setup', icon: '⚡' },
   { path: '/admin/settings', label: 'Settings', icon: '⚙' },
 ];
 

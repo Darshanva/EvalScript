@@ -8,6 +8,8 @@ export default function SettingsPage() {
   const { state, updateSystemSettings, showToast } = useApp();
   const [settings, setSettings] = useState<SystemSettings>({
     ...state.systemSettings,
+    claudeModel:
+      state.systemSettings.claudeModel || 'claude-sonnet-4-20250514',
   });
   const [saving, setSaving] = useState(false);
 
@@ -19,8 +21,10 @@ export default function SettingsPage() {
     setSaving(true);
     try {
       updateSystemSettings(settings);
-      // persist in browser so refresh keeps admin choices
-      localStorage.setItem('evalscript_system_settings', JSON.stringify(settings));
+      localStorage.setItem(
+        'evalscript_system_settings',
+        JSON.stringify(settings)
+      );
       showToast('Settings saved.', 'success');
     } catch {
       showToast('Failed to save settings', 'error');
@@ -29,11 +33,18 @@ export default function SettingsPage() {
     }
   }
 
+  const modeValue =
+    settings.aiMode === 'groq' ? 'claude' : settings.aiMode || 'claude';
+  const providerValue =
+    settings.aiProvider === 'groq'
+      ? 'claude'
+      : settings.aiProvider || 'claude';
+
   return (
     <PageContainer>
       <PageHeader
         title="System Settings"
-        subtitle="AI limits, thresholds, and platform behaviour."
+        subtitle="AI limits, thresholds, and Claude configuration."
         breadcrumb="Admin Console"
       />
 
@@ -43,32 +54,47 @@ export default function SettingsPage() {
           <div className="space-y-4">
             <Select
               label="AI Mode"
-              value={settings.aiMode}
+              value={modeValue}
               options={[
-                { value: 'demo', label: 'Demo Mode (simulated evaluation)' },
-                { value: 'groq', label: 'Production (Groq API — needs server key)' },
+                { value: 'demo', label: 'Demo Mode (simulated, no API)' },
+                {
+                  value: 'claude',
+                  label: 'Production (Claude via backend)',
+                },
               ]}
               onChange={(e) =>
-                update({ aiMode: e.target.value as 'demo' | 'groq' })
+                update({
+                  aiMode: e.target.value as 'demo' | 'claude',
+                  aiProvider: e.target.value as 'demo' | 'claude',
+                })
               }
             />
             <Select
               label="AI Provider"
-              value={settings.aiProvider}
+              value={providerValue}
               options={[
                 { value: 'demo', label: 'Demo Provider' },
-                { value: 'groq', label: 'Groq' },
+                { value: 'claude', label: 'Claude (Anthropic)' },
               ]}
               onChange={(e) =>
-                update({ aiProvider: e.target.value as 'demo' | 'groq' })
+                update({
+                  aiProvider: e.target.value as 'demo' | 'claude',
+                })
               }
             />
             <Input
-              label="Groq Model"
-              value={settings.groqModel || ''}
-              onChange={(e) => update({ groqModel: e.target.value })}
-              hint="Vision model id, e.g. llama-3.2-11b-vision-preview"
+              label="Claude Model"
+              value={settings.claudeModel || 'claude-sonnet-4-20250514'}
+              onChange={(e) => update({ claudeModel: e.target.value })}
+              hint="Preferred model id. Backend should use CLAUDE_MODEL env."
             />
+            <div className="px-4 py-3 bg-navy-50 border border-navy-200 rounded-lg text-xs text-navy-700">
+              <p className="font-medium mb-1">Security</p>
+              <p>
+                Put ANTHROPIC_API_KEY only on Render/backend. Never in Vite
+                client code or GitHub.
+              </p>
+            </div>
           </div>
         </Card>
 
@@ -91,7 +117,8 @@ export default function SettingsPage() {
               value={settings.maxAiRequestsPerStudentPerDay}
               onChange={(e) =>
                 update({
-                  maxAiRequestsPerStudentPerDay: parseInt(e.target.value) || 5,
+                  maxAiRequestsPerStudentPerDay:
+                    parseInt(e.target.value) || 5,
                 })
               }
             />
@@ -102,7 +129,9 @@ export default function SettingsPage() {
               max="100"
               value={settings.maxPagesPerSubmission}
               onChange={(e) =>
-                update({ maxPagesPerSubmission: parseInt(e.target.value) || 30 })
+                update({
+                  maxPagesPerSubmission: parseInt(e.target.value) || 30,
+                })
               }
             />
             <Input
@@ -127,7 +156,9 @@ export default function SettingsPage() {
               type="number"
               min="50"
               max="100"
-              value={Math.round((settings.highConfidenceThreshold || 0.9) * 100)}
+              value={Math.round(
+                (settings.highConfidenceThreshold || 0.9) * 100
+              )}
               onChange={(e) =>
                 update({
                   highConfidenceThreshold: parseInt(e.target.value) / 100,
@@ -154,7 +185,14 @@ export default function SettingsPage() {
         <div className="flex gap-3">
           <Button
             variant="secondary"
-            onClick={() => setSettings({ ...state.systemSettings })}
+            onClick={() =>
+              setSettings({
+                ...state.systemSettings,
+                claudeModel:
+                  state.systemSettings.claudeModel ||
+                  'claude-sonnet-4-20250514',
+              })
+            }
           >
             Reset
           </Button>

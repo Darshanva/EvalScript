@@ -181,10 +181,16 @@ export interface AIUsageRecord {
 }
 
 export interface SystemSettings {
-  aiMode: 'demo' | 'groq' | 'anthropic';
+  maxAiRequestsPerDay: number;
+  maxAiRequestsPerStudentPerDay: number;
   maxPagesPerSubmission: number;
-  autoPublish: boolean;
-  [key: string]: any;
+  maxUploadSizeMb: number;
+  highConfidenceThreshold: number;
+  mediumConfidenceThreshold: number;
+  aiMode: 'demo' | 'claude' | 'groq';
+  aiProvider: 'demo' | 'claude' | 'groq';
+  groqModel: string;
+  claudeModel: string;
 }
 
 export interface DisputeRequest {
