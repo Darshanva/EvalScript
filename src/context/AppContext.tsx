@@ -93,6 +93,27 @@ type AppAction =
   | { type: 'UPDATE_SYSTEM_SETTINGS'; settings: SystemSettings }
   | { type: 'ADD_USER'; user: User };
 
+function mapProfileRow(row: any): User {
+  return {
+    id: row.id,
+    email: row.email,
+    name: row.name,
+    role: row.role,
+    avatarInitials:
+      row.avatar_initials || row.name?.slice(0, 2).toUpperCase() || 'U',
+    studentId: row.student_id,
+    facultyId: row.faculty_id,
+    department: row.department,
+    calibrated: row.calibrated || false,
+    createdAt: row.created_at,
+    client: row.client || undefined,
+    organisation: row.organisation || undefined,
+    batch: row.batch || undefined,
+    term: row.term || undefined,
+    section: row.section || undefined,
+  };
+}
+
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'LOGIN_SUCCESS':
@@ -277,18 +298,7 @@ async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
   let users: User[] = [];
   try {
     const { data } = await supabase.from('profiles').select('*').order('name');
-    users = (data || []).map((row: any) => ({
-      id: row.id,
-      email: row.email,
-      name: row.name,
-      role: row.role,
-      avatarInitials:
-        row.avatar_initials || row.name?.slice(0, 2).toUpperCase() || 'U',
-      studentId: row.student_id,
-      department: row.department,
-      calibrated: row.calibrated || false,
-      createdAt: row.created_at,
-    }));
+    users = (data || []).map(mapProfileRow);
   } catch (e) {
     console.warn('profiles load failed', e);
   }
@@ -320,7 +330,16 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (session?.user && mounted) {
         const profile = await ensureProfile(session.user);
         if (profile) {
-          dispatch({ type: 'LOGIN_SUCCESS', user: profile });
+          // ensureProfile may omit new fields — re-map from DB if needed
+          const enriched = {
+            ...profile,
+            client: (profile as User).client,
+            organisation: (profile as User).organisation,
+            batch: (profile as User).batch,
+            term: (profile as User).term,
+            section: (profile as User).section,
+          };
+          dispatch({ type: 'LOGIN_SUCCESS', user: enriched });
           await loadCloudData(dispatch);
         }
       }
@@ -335,7 +354,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (event === 'SIGNED_IN' && session?.user) {
         const profile = await ensureProfile(session.user);
         if (profile) {
-          dispatch({ type: 'LOGIN_SUCCESS', user: profile });
+          dispatch({ type: 'LOGIN_SUCCESS', user: profile as User });
           await loadCloudData(dispatch);
         }
       }
@@ -614,17 +633,51 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  /** Student sees exams for their Client/Batch/Term/Section path */
   const getExamsForCurrentUser = useCallback((): Exam[] => {
-    if (!state.currentUser) return [];
-    if (state.currentUser.role === 'student') {
-      return state.exams.filter(
-        (e) => !e.studentIds?.length || e.studentIds.includes(state.currentUser!.id)
-      );
+    const u = state.currentUser;
+    if (!u) return [];
+
+    if (u.role === 'admin') return state.exams;
+
+    if (u.role === 'faculty') {
+      return state.exams.filter((e) => e.facultyId === u.id);
     }
-    if (state.currentUser.role === 'faculty') {
-      return state.exams.filter((e) => e.facultyId === state.currentUser!.id);
-    }
-    return state.exams;
+
+    // student
+    const section = (u.section || '').toLowerCase().trim();
+    const batch = (u.batch || '').toLowerCase().trim();
+    const term = (u.term || '').toLowerCase().trim();
+    const client = (u.client || '').toLowerCase().trim();
+    const org = (u.organisation || '').toLowerCase().trim();
+
+    return state.exams.filter((exam) => {
+      const status = (exam.status || 'ACTIVE').toUpperCase();
+      if (status !== 'ACTIVE' && status !== 'OPEN') return false;
+
+      if (exam.studentIds?.length && exam.studentIds.includes(u.id)) {
+        return true;
+      }
+
+      const hay =
+        `${exam.description || ''} ${exam.title || ''} ${exam.code || ''}`.toLowerCase();
+
+      if (section) {
+        const sectionHit =
+          hay.includes(section) ||
+          hay.includes(`section ${section}`) ||
+          hay.includes(`section${section}`);
+        if (!sectionHit) return false;
+        if (batch && hay.includes('batch') && !hay.includes(batch)) {
+          // section matched; batch soft-check only
+        }
+        return true;
+      }
+
+      const parts = [client, org, batch, term].filter(Boolean);
+      if (!parts.length) return true;
+      return parts.every((p) => hay.includes(p));
+    });
   }, [state.currentUser, state.exams]);
 
   const getSubmissionsForCurrentUser = useCallback((): Submission[] => {

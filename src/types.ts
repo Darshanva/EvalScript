@@ -1,5 +1,3 @@
-// src/types/index.ts  (or src/types.ts)
-
 export type UserRole = 'student' | 'faculty' | 'admin';
 
 export type PageRoute =
@@ -13,7 +11,6 @@ export type PageRoute =
   | 's-disputes'
   | 'f-dashboard'
   | 'f-create-exam'
-  | 'f-rubric-builder'
   | 'f-reviews'
   | 'f-review'
   | 'f-results'
@@ -23,14 +20,16 @@ export type PageRoute =
   | 'a-usage'
   | 'a-audit'
   | 'a-settings'
-  | 'a-groq';
+  | 'a-groq'
+  | 'a-structure'
+  | 'a-publish-rights';
 
 export interface NavigationContext {
+  selectedExamId?: string;
+  selectedEvaluationId?: string;
+  selectedSubmissionId?: string;
   role?: string;
-  examId?: string;
-  submissionId?: string;
-  evaluationId?: string;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface User {
@@ -40,8 +39,16 @@ export interface User {
   role: UserRole;
   avatarInitials: string;
   studentId?: string;
+  facultyId?: string;
   department?: string;
   calibrated?: boolean;
+  createdAt?: string;
+  /** Student placement in Exam Structure */
+  client?: string;
+  organisation?: string;
+  batch?: string;
+  term?: string;
+  section?: string;
 }
 
 export interface Exam {
@@ -54,7 +61,7 @@ export interface Exam {
   date: string;
   duration: number;
   maxMarks: number;
-  status: 'DRAFT' | 'ACTIVE' | 'CLOSED';
+  status: string;
   studentIds: string[];
   rubricId: string;
   description?: string;
@@ -65,7 +72,6 @@ export interface RubricCriterion {
   id: string;
   description: string;
   maxMarks: number;
-  order?: string;
 }
 
 export interface RubricQuestion {
@@ -88,65 +94,69 @@ export interface SubmissionPage {
   id: string;
   pageNumber: number;
   imageUrl: string;
-  thumbnailUrl?: string;
+  thumbnailUrl: string;
+  fileName?: string;
 }
 
 export interface Submission {
   id: string;
+  examId: string;
+  examTitle?: string;
+  examCode?: string;
   studentId: string;
   studentName: string;
-  examId: string;
-  submittedAt: string;
   pages: SubmissionPage[];
-  status:
-    | 'SUBMITTED'
-    | 'PROCESSING'
-    | 'AI_COMPLETE'
-    | 'FACULTY_REVIEW'
-    | 'REVIEWED'
-    | 'PUBLISHED'
-    | 'FAILED';
   pageCount: number;
-  evaluationId?: string;
+  status: string;
+  submittedAt: string;
+  createdAt?: string;
+}
+
+export interface CriterionScore {
+  criterionId: string;
+  criterion: string;
+  awarded: number;
+  max: number;
 }
 
 export interface EvaluationQuestion {
-  questionId: string;
-  questionNumber: string;
-  questionText: string;
+  id: string;
+  questionNumber: number | string;
   maxMarks: number;
-  aiMarks: number;
-  facultyMarks?: number;
+  totalAwarded: number;
+  facultyAwarded?: number;
   confidence: number;
-  confidenceLevel: 'HIGH' | 'MEDIUM' | 'LOW';
-  transcription?: string;
-  feedback?: string;
-  flags?: string[];
-  criteriaScores?: {
-    criterionId: string;
-    description: string;
-    maxMarks: number;
-    aiMarks: number;
-    facultyMarks?: number;
-  }[];
+  confidenceLevel?: string;
+  flags: string[];
+  studentAnswer?: string;
+  answerSummary?: string;
+  feedback: string;
+  facultyFeedback?: string;
+  criteriaScores: CriterionScore[];
 }
 
 export interface Evaluation {
   id: string;
   submissionId: string;
   examId: string;
+  examTitle: string;
+  examCode?: string;
   studentId: string;
   studentName: string;
+  status: string;
   totalMarks: number;
-  maxMarks: number;
   facultyTotalMarks?: number;
-  status: 'AI_COMPLETE' | 'FACULTY_REVIEW' | 'REVIEWED' | 'PUBLISHED';
-  questions: EvaluationQuestion[];
+  maxMarks: number;
   overallConfidence?: number;
+  overallConfidenceLevel?: string;
+  flags: string[];
+  transcription?: string;
+  questions: EvaluationQuestion[];
+  facultyNotes?: string;
   facultyId?: string;
   facultyName?: string;
+  aiGeneratedAt?: string;
   facultyReviewedAt?: string;
-  facultyNotes?: string;
   publishedAt?: string;
   createdAt?: string;
 }
@@ -154,10 +164,8 @@ export interface Evaluation {
 export interface CalibrationSample {
   id: string;
   studentId: string;
-  imageUrl: string;
-  uploadedAt: string;
-  qualityScore?: number;
-  status: 'PENDING' | 'APPROVED' | 'REJECTED';
+  imageUrl?: string;
+  createdAt: string;
 }
 
 export interface AuditLog {
@@ -167,17 +175,18 @@ export interface AuditLog {
   userRole: string;
   action: string;
   entity: string;
-  entityId: string;
-  details: string;
+  entityId?: string;
+  details?: string;
   timestamp: string;
 }
 
 export interface AIUsageRecord {
   id: string;
   date: string;
-  pagesProcessed: number;
-  tokensUsed?: number;
-  cost?: number;
+  requestCount: number;
+  pageCount: number;
+  successCount: number;
+  failureCount: number;
 }
 
 export interface SystemSettings {
@@ -187,24 +196,27 @@ export interface SystemSettings {
   maxUploadSizeMb: number;
   highConfidenceThreshold: number;
   mediumConfidenceThreshold: number;
-  aiMode: 'demo' | 'claude' | 'groq';
-  aiProvider: 'demo' | 'claude' | 'groq';
-  groqModel: string;
-  claudeModel: string;
+  aiMode: string;
+  aiProvider: string;
+  groqModel?: string;
+  claudeModel?: string;
 }
+
+export type DisputeStatus = 'OPEN' | 'UNDER_REVIEW' | 'RESOLVED' | 'REJECTED';
 
 export interface DisputeRequest {
   id: string;
   evaluationId: string;
   studentId: string;
   studentName: string;
+  examTitle: string;
   reason: string;
-  status: 'OPEN' | 'UNDER_REVIEW' | 'RESOLVED' | 'REJECTED';
-  createdAt: string;
+  questionNumbers: string[];
+  status: DisputeStatus;
   resolution?: string;
-  resolvedAt?: string;
-  facultyId?: string;
   facultyName?: string;
+  createdAt: string;
+  resolvedAt?: string;
 }
 
 export interface ResultVersion {
@@ -217,9 +229,5 @@ export interface ResultVersion {
   facultyId: string;
   facultyName: string;
   timestamp: string;
-  questionChanges: {
-    questionId: string;
-    oldMarks: number;
-    newMarks: number;
-  }[];
+  questionChanges?: unknown;
 }
