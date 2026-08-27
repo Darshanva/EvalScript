@@ -33,6 +33,7 @@ const ADMIN_NAV: NavItem[] = [
   { path: '/admin/audit', label: 'Audit Logs', icon: '☰' },
   { path: '/admin/groq', label: 'Claude Setup', icon: '⚡' },
   { path: '/admin/settings', label: 'Settings', icon: '⚙' },
+  { path: '/admin/publish-rights', label: 'Publish Rights', icon: '☑' },
 ];
 
 function getNavItems(role: string): NavItem[] {

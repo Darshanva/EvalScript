@@ -34,6 +34,7 @@ import AuditLogsPage from './pages/admin/AuditLogsPage';
 import SettingsPage from './pages/admin/SettingsPage';
 import GroqSetupPage from './pages/admin/GroqSetupPage';
 import ExamStructurePage from './pages/admin/ExamStructurePage';
+import PublishRightsPage from './pages/admin/PublishRightsPage';
 
 function NavigationBinder() {
   const navigate = useNavigate();
@@ -319,7 +320,16 @@ function AppRoutes() {
             </ProtectedRoute>
           }
         />
-
+        <Route
+  path="/admin/publish-rights"
+  element={
+    <ProtectedRoute roles={['admin']}>
+      <AppLayout>
+        <PublishRightsPage />
+      </AppLayout>
+    </ProtectedRoute>
+  }
+/>
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
 
