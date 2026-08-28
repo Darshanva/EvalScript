@@ -1,270 +1,398 @@
-import React, { useState, useRef } from 'react';
+import React, { useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
-import { Button, Card, Spinner, Badge } from '../../components/ui';
+import { Button, Card, Badge, Spinner } from '../../components/ui';
 import { PageContainer, PageHeader } from '../../components/Layout';
+import { supabase } from '../../lib/supabase';
+import { runCalibrationAnalysis } from '../../lib/calibration-ai';
 import { CALIBRATION_PASSAGE } from '../../lib/seed-data';
 import type { CalibrationSample } from '../../types';
 
-type Step = 'instructions' | 'upload' | 'preview' | 'confirm';
+type Pace = 'slow' | 'medium' | 'fast';
 
-const SAMPLE_CALIBRATION_IMAGE =
-  'https://images.unsplash.com/photo-1456735190827-d1262f71b8a3?w=800&h=600&fit=crop&auto=format';
+const PACE_META: { key: Pace; title: string; hint: string }[] = [
+  {
+    key: 'slow',
+    title: '1 · Slow',
+    hint: 'Copy the reference carefully and slowly, as neatly as you can.',
+  },
+  {
+    key: 'medium',
+    title: '2 · Medium',
+    hint: 'Copy at your normal natural exam pace.',
+  },
+  {
+    key: 'fast',
+    title: '3 · Fast',
+    hint: 'Copy quickly, as under time pressure.',
+  },
+];
+
+function genId() {
+  return `cal-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+}
+
+async function uploadCalFile(
+  file: File,
+  studentId: string,
+  pace: Pace
+): Promise<string> {
+  const ext = file.name.split('.').pop() || 'jpg';
+  const path = `calibration/${studentId}/${pace}-${Date.now()}.${ext}`;
+
+  const { error } = await supabase.storage
+    .from('answer-scripts')
+    .upload(path, file, { upsert: true, contentType: file.type });
+
+  if (error) {
+    console.warn('storage failed, blob URL', error);
+    return URL.createObjectURL(file);
+  }
+
+  const { data } = supabase.storage.from('answer-scripts').getPublicUrl(path);
+  if (
+    !data.publicUrl ||
+    data.publicUrl.includes('unsplash') ||
+    data.publicUrl.includes('placeholder')
+  ) {
+    return URL.createObjectURL(file);
+  }
+  return data.publicUrl;
+}
 
 export default function CalibrationPage() {
-  const { state, navigate, addCalibration, showToast, getCalibrationForStudent } = useApp();
-  const { currentUser } = state;
-  const [step, setStep] = useState<Step>('instructions');
-  const [dragging, setDragging] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
-  const [analysing, setAnalysing] = useState(false);
-  const [qualityScore] = useState(0.87);
-  const fileRef = useRef<HTMLInputElement>(null);
+  const navigate = useNavigate();
+  const { state, addCalibration, showToast } = useApp();
+  const user = state.currentUser;
 
-  if (!currentUser) return null;
-  const existingCalibration = getCalibrationForStudent(currentUser.id);
+  const existing = user
+    ? state.calibrations.find((c) => c.studentId === user.id)
+    : undefined;
 
-  function simulateUpload(_file: File | null) {
-    setUploading(true);
-    setTimeout(() => {
-      setPreviewUrl(SAMPLE_CALIBRATION_IMAGE);
-      setUploading(false);
-      setStep('preview');
-    }, 1800);
+  const [urls, setUrls] = useState<Record<Pace, string | null>>({
+    slow: existing?.imageUrls?.slow || null,
+    medium: existing?.imageUrls?.medium || null,
+    fast: existing?.imageUrls?.fast || null,
+  });
+  const [analyzing, setAnalyzing] = useState(false);
+  const [result, setResult] = useState<{
+    qualityScore: number;
+    feedback: string;
+    transcription: string;
+    strengths: string[];
+    improvements: string[];
+    paceNotes: { slow: string; medium: string; fast: string };
+  } | null>(
+    existing?.qualityScore != null
+      ? {
+          qualityScore: existing.qualityScore,
+          feedback: existing.feedback || '',
+          transcription: existing.transcription || '',
+          strengths: existing.strengths || [],
+          improvements: existing.improvements || [],
+          paceNotes: { slow: '', medium: '', fast: '' },
+        }
+      : null
+  );
+
+  const inputRefs = {
+    slow: useRef<HTMLInputElement>(null),
+    medium: useRef<HTMLInputElement>(null),
+    fast: useRef<HTMLInputElement>(null),
+  };
+
+  if (!user) return null;
+
+  const allReady = !!(urls.slow && urls.medium && urls.fast);
+
+  async function onPick(pace: Pace, list: FileList | null) {
+    const file = list?.[0];
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      showToast('Image only', 'error');
+      return;
+    }
+
+    const local = URL.createObjectURL(file);
+    setUrls((u) => ({ ...u, [pace]: local }));
+    setResult(null);
+
+    try {
+      const publicUrl = await uploadCalFile(file, user!.id, pace);
+      setUrls((u) => ({ ...u, [pace]: publicUrl }));
+      if (publicUrl !== local) {
+        try {
+          URL.revokeObjectURL(local);
+        } catch {
+          /* ignore */
+        }
+      }
+    } catch {
+      /* keep local */
+    }
   }
 
-  function handleFileChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0] ?? null;
-    simulateUpload(file);
+  function clearPace(pace: Pace) {
+    const prev = urls[pace];
+    if (prev?.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(prev);
+      } catch {
+        /* ignore */
+      }
+    }
+    setUrls((u) => ({ ...u, [pace]: null }));
+    setResult(null);
   }
 
-  function handleDrop(e: React.DragEvent) {
-    e.preventDefault();
-    setDragging(false);
-    const file = e.dataTransfer.files?.[0];
-    if (file) simulateUpload(file);
-  }
+  async function runAnalysis() {
+    if (!allReady) {
+      showToast('Upload all 3 samples (slow, medium, fast)', 'error');
+      return;
+    }
+    setAnalyzing(true);
+    try {
+      const analysis = await runCalibrationAnalysis({
+        slowUrl: urls.slow!,
+        mediumUrl: urls.medium!,
+        fastUrl: urls.fast!,
+        studentName: user!.name,
+      });
 
-  function handleConfirm() {
-    if (!currentUser) return;
-    setAnalysing(true);
-    setTimeout(() => {
       const sample: CalibrationSample = {
-        id: `cal-${currentUser!.id}-${Date.now()}`,
-        studentId: currentUser!.id,
-        imageUrl: SAMPLE_CALIBRATION_IMAGE,
-        uploadedAt: new Date().toISOString(),
-        qualityScore,
-        status: 'APPROVED',
+        id: existing?.id || genId(),
+        studentId: user!.id,
+        imageUrl: urls.slow!,
+        imageUrls: {
+          slow: urls.slow!,
+          medium: urls.medium!,
+          fast: urls.fast!,
+        },
+        qualityScore: analysis.qualityScore,
+        feedback: analysis.feedback,
+        transcription: analysis.transcription,
+        strengths: analysis.strengths,
+        improvements: analysis.improvements,
+        createdAt: new Date().toISOString(),
       };
+
       addCalibration(sample);
-      showToast('Calibration uploaded successfully. You can now submit exams.', 'success');
-      setAnalysing(false);
-      navigate('s-dashboard');
-    }, 2000);
+
+      await supabase
+        .from('profiles')
+        .update({ calibrated: true })
+        .eq('id', user!.id);
+
+      setResult({
+        qualityScore: analysis.qualityScore,
+        feedback: analysis.feedback,
+        transcription: analysis.transcription,
+        strengths: analysis.strengths,
+        improvements: analysis.improvements,
+        paceNotes: analysis.paceNotes,
+      });
+      showToast(`Handwriting score: ${analysis.qualityScore}%`, 'success');
+    } catch (e: any) {
+      console.error(e);
+      showToast(e.message || 'Analysis failed', 'error');
+    } finally {
+      setAnalyzing(false);
+    }
   }
 
   return (
     <PageContainer>
       <PageHeader
         title="Handwriting Calibration"
-        subtitle="A one-time sample to help the AI read your handwriting more accurately."
+        subtitle="Copy the reference text three times (slow, medium, fast), then upload photos."
         breadcrumb="Student Portal"
       />
 
-      {existingCalibration && (
-        <div className="mb-6 px-4 py-3 bg-emerald-50 border border-emerald-200 rounded-xl flex items-center gap-3">
-          <span className="text-emerald-500">✓</span>
+      {/* ——— Reference passage (what to write) ——— */}
+      <Card className="mb-6 border-2 border-navy-200 bg-navy-50/40">
+        <div className="flex items-start justify-between gap-3 mb-3">
           <div>
-            <p className="text-sm font-medium text-emerald-800">Calibration on record</p>
-            <p className="text-xs text-emerald-600">
-              Quality: {Math.round(existingCalibration.qualityScore * 100)}% · You can retake
-              at any time.
+            <h3 className="font-semibold text-navy-900 text-sm">
+              Reference — write this on paper
+            </h3>
+            <p className="text-xs text-navy-700 mt-1">
+              Use plain paper and a pen. Write the full passage once for each pace
+              (slow / medium / fast), then photograph each sheet.
             </p>
           </div>
+          <Badge variant="navy">Sample</Badge>
         </div>
+        <div className="rounded-xl bg-white border border-navy-100 p-4 sm:p-5">
+          <pre className="text-sm text-slate-800 whitespace-pre-wrap font-sans leading-relaxed">
+            {CALIBRATION_PASSAGE}
+          </pre>
+        </div>
+      </Card>
+
+      <div className="grid md:grid-cols-3 gap-4 mb-6">
+        {PACE_META.map((p) => (
+          <Card key={p.key} className="flex flex-col">
+            <div className="flex items-center justify-between mb-2">
+              <h3 className="font-semibold text-sm text-slate-900">{p.title}</h3>
+              {urls[p.key] && <Badge variant="success">Ready</Badge>}
+            </div>
+            <p className="text-xs text-slate-500 mb-3">{p.hint}</p>
+
+            {urls[p.key] ? (
+              <div className="relative rounded-lg overflow-hidden border border-slate-200 bg-white aspect-[3/4] mb-3">
+                <img
+                  src={urls[p.key]!}
+                  alt={p.title}
+                  className="w-full h-full object-contain"
+                />
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => inputRefs[p.key].current?.click()}
+                className="aspect-[3/4] mb-3 border-2 border-dashed border-slate-300 rounded-lg flex flex-col items-center justify-center text-slate-400 hover:border-navy-400 hover:bg-slate-50"
+              >
+                <span className="text-2xl mb-1">↑</span>
+                <span className="text-xs text-center px-2">
+                  Photo of your {p.key} writing
+                </span>
+              </button>
+            )}
+
+            <input
+              ref={inputRefs[p.key]}
+              type="file"
+              accept="image/*"
+              capture="environment"
+              className="hidden"
+              onChange={(e) => onPick(p.key, e.target.files)}
+            />
+
+            <div className="flex gap-2 mt-auto">
+              <Button
+                size="sm"
+                variant="secondary"
+                className="flex-1"
+                onClick={() => inputRefs[p.key].current?.click()}
+              >
+                {urls[p.key] ? 'Replace' : 'Upload'}
+              </Button>
+              {urls[p.key] && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="text-red-600"
+                  onClick={() => clearPace(p.key)}
+                >
+                  ✕
+                </Button>
+              )}
+            </div>
+          </Card>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap gap-3 mb-8">
+        <Button
+          loading={analyzing}
+          disabled={!allReady || analyzing}
+          onClick={runAnalysis}
+        >
+          {analyzing ? 'AI analysing…' : 'Analyse handwriting'}
+        </Button>
+        {(user.calibrated || result) && (
+          <Badge variant="success">Calibrated</Badge>
+        )}
+      </div>
+
+      {analyzing && (
+        <Card className="mb-6 flex items-center gap-3">
+          <Spinner size="md" />
+          <p className="text-sm text-slate-600">
+            Transcribing samples and scoring handwriting quality…
+          </p>
+        </Card>
       )}
 
-      {/* Step: Instructions */}
-      {step === 'instructions' && (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          <div>
-            <Card className="mb-5">
-              <h3 className="font-semibold text-slate-900 mb-3">Why calibrate?</h3>
-              <p className="text-sm text-slate-600 leading-relaxed mb-4">
-                The AI uses your calibration sample as a visual reference when transcribing
-                your exam answers. It learns the shapes of your letters and numbers, improving
-                transcription accuracy — especially for ambiguous characters like 1 vs l, 0 vs O,
-                or cursive joins.
-              </p>
-              <ul className="space-y-2">
-                {[
-                  'Write naturally — do not alter your handwriting',
-                  'Use the same pen/pencil you will use in exams',
-                  'Write on plain A4 white paper',
-                  'Photograph in good lighting, keep the camera flat',
-                  'Accepted formats: JPG, PNG, PDF (single page)',
-                ].map((tip) => (
-                  <li key={tip} className="flex items-start gap-2 text-sm text-slate-600">
-                    <span className="text-navy-600 mt-0.5 shrink-0">•</span>
-                    {tip}
-                  </li>
+      {result && (
+        <div className="space-y-4 max-w-3xl">
+          <Card>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="font-semibold text-slate-900">Overall score</h3>
+              <span className="text-3xl font-bold text-navy-800">
+                {result.qualityScore}
+                <span className="text-lg text-slate-500">%</span>
+              </span>
+            </div>
+            <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-navy-600 rounded-full"
+                style={{
+                  width: `${Math.min(100, Math.max(0, result.qualityScore))}%`,
+                }}
+              />
+            </div>
+            <p className="text-sm text-slate-600 mt-4">{result.feedback}</p>
+          </Card>
+
+          <div className="grid md:grid-cols-2 gap-4">
+            <Card>
+              <h4 className="font-semibold text-sm text-emerald-800 mb-2">
+                Strengths
+              </h4>
+              <ul className="text-sm text-slate-700 space-y-1 list-disc pl-4">
+                {result.strengths.map((s, i) => (
+                  <li key={i}>{s}</li>
                 ))}
               </ul>
             </Card>
-            <Button onClick={() => setStep('upload')}>
-              Begin Calibration →
-            </Button>
+            <Card>
+              <h4 className="font-semibold text-sm text-amber-800 mb-2">
+                Improve
+              </h4>
+              <ul className="text-sm text-slate-700 space-y-1 list-disc pl-4">
+                {result.improvements.map((s, i) => (
+                  <li key={i}>{s}</li>
+                ))}
+              </ul>
+            </Card>
           </div>
 
-          <Card className="bg-navy-50 border-navy-200">
-            <h3 className="font-semibold text-navy-900 mb-3 text-sm">Reference passage to write</h3>
-            <p className="text-xs font-mono text-navy-800 leading-relaxed whitespace-pre-wrap bg-white/60 rounded-lg p-4 border border-navy-200">
-              {CALIBRATION_PASSAGE}
-            </p>
-          </Card>
-        </div>
-      )}
-
-      {/* Step: Upload */}
-      {step === 'upload' && (
-        <div className="max-w-xl">
-          <Card className="bg-navy-50 border-navy-200 mb-5 text-sm text-navy-800">
-            <p>
-              Write the reference passage shown in the instructions, then photograph or scan it and
-              upload the image below.
-            </p>
-          </Card>
-
-          {uploading ? (
-            <Card className="flex flex-col items-center justify-center py-16 gap-4">
-              <Spinner size="lg" />
-              <p className="text-sm text-slate-600">Uploading your calibration sample…</p>
+          {(result.paceNotes.slow ||
+            result.paceNotes.medium ||
+            result.paceNotes.fast) && (
+            <Card>
+              <h4 className="font-semibold text-sm mb-2">By pace</h4>
+              <div className="space-y-2 text-sm text-slate-600">
+                {result.paceNotes.slow && (
+                  <p>
+                    <strong>Slow:</strong> {result.paceNotes.slow}
+                  </p>
+                )}
+                {result.paceNotes.medium && (
+                  <p>
+                    <strong>Medium:</strong> {result.paceNotes.medium}
+                  </p>
+                )}
+                {result.paceNotes.fast && (
+                  <p>
+                    <strong>Fast:</strong> {result.paceNotes.fast}
+                  </p>
+                )}
+              </div>
             </Card>
-          ) : (
-            <div
-              className={`border-2 border-dashed rounded-2xl p-12 flex flex-col items-center justify-center gap-4 cursor-pointer transition-colors ${dragging ? 'border-navy-500 bg-navy-50' : 'border-slate-300 bg-white hover:border-navy-400 hover:bg-slate-50'}`}
-              onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
-              onDragLeave={() => setDragging(false)}
-              onDrop={handleDrop}
-              onClick={() => fileRef.current?.click()}
-            >
-              <div className="w-14 h-14 bg-navy-50 rounded-2xl flex items-center justify-center text-navy-500 text-3xl border border-navy-200">
-                ↑
-              </div>
-              <div className="text-center">
-                <p className="font-medium text-slate-800">Drop your file here</p>
-                <p className="text-sm text-slate-500 mt-1">or click to browse</p>
-                <p className="text-xs text-slate-400 mt-2">JPG, PNG, PDF · max 10MB</p>
-              </div>
-              <input
-                ref={fileRef}
-                type="file"
-                accept=".jpg,.jpeg,.png,.pdf"
-                className="hidden"
-                onChange={handleFileChange}
-              />
-            </div>
           )}
 
-          <div className="mt-4 flex gap-3">
-            <Button variant="ghost" onClick={() => setStep('instructions')}>
-              ← Back
-            </Button>
-            <Button
-              variant="secondary"
-              onClick={() => simulateUpload(null)}
-            >
-              Use demo image
-            </Button>
-          </div>
-        </div>
-      )}
+          {result.transcription && (
+            <Card>
+              <h4 className="font-semibold text-sm mb-2">Transcription notes</h4>
+              <pre className="text-xs text-slate-600 whitespace-pre-wrap bg-slate-50 p-3 rounded-lg">
+                {result.transcription}
+              </pre>
+            </Card>
+          )}
 
-      {/* Step: Preview */}
-      {step === 'preview' && previewUrl && (
-        <div className="max-w-2xl">
-          <Card className="mb-5">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="font-semibold text-slate-900">Preview your calibration sample</h3>
-              <div className="flex items-center gap-2">
-                <span className="text-xs text-slate-500">Quality:</span>
-                <Badge variant={qualityScore >= 0.8 ? 'success' : 'warning'}>
-                  {Math.round(qualityScore * 100)}%
-                </Badge>
-              </div>
-            </div>
-            <img
-              src={previewUrl}
-              alt="Calibration preview"
-              className="w-full rounded-xl border border-slate-200 object-cover"
-              style={{ maxHeight: 400 }}
-            />
-            {qualityScore < 0.75 && (
-              <div className="mt-4 px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg">
-                <p className="text-sm text-amber-800">
-                  <span className="font-medium">Low quality detected.</span> Consider retaking in
-                  better lighting or ensuring the image is in focus.
-                </p>
-              </div>
-            )}
-          </Card>
-
-          <div className="flex gap-3">
-            <Button variant="secondary" onClick={() => setStep('upload')}>
-              ← Retake
-            </Button>
-            <Button onClick={() => setStep('confirm')}>
-              Confirm sample →
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {/* Step: Confirm */}
-      {step === 'confirm' && (
-        <div className="max-w-xl">
-          <Card className="mb-5">
-            <div className="flex items-center gap-3 mb-5">
-              <div className="w-10 h-10 bg-emerald-100 rounded-lg flex items-center justify-center text-emerald-600 text-xl">
-                ✓
-              </div>
-              <div>
-                <p className="font-semibold text-slate-900">Ready to submit</p>
-                <p className="text-sm text-slate-500">
-                  Your calibration sample will be stored securely.
-                </p>
-              </div>
-            </div>
-            <ul className="space-y-2 mb-5">
-              {[
-                'This sample will be used as a visual reference during AI transcription.',
-                'It is NOT used to train any AI model.',
-                'You may retake this calibration at any time.',
-                'Your original sample is stored privately and is never shared.',
-              ].map((item) => (
-                <li key={item} className="flex items-start gap-2 text-sm text-slate-600">
-                  <span className="text-navy-500 mt-0.5 shrink-0">•</span>
-                  {item}
-                </li>
-              ))}
-            </ul>
-            {analysing ? (
-              <div className="flex items-center gap-3 py-3">
-                <Spinner />
-                <span className="text-sm text-slate-600">Analysing and storing your calibration…</span>
-              </div>
-            ) : (
-              <div className="flex gap-3">
-                <Button variant="ghost" onClick={() => setStep('preview')}>
-                  ← Back
-                </Button>
-                <Button onClick={handleConfirm}>
-                  Submit Calibration
-                </Button>
-              </div>
-            )}
-          </Card>
+          <Button onClick={() => navigate('/student')}>Go to Dashboard</Button>
         </div>
       )}
     </PageContainer>

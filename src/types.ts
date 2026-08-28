@@ -164,7 +164,18 @@ export interface Evaluation {
 export interface CalibrationSample {
   id: string;
   studentId: string;
+  /** @deprecated single image — use imageUrls */
   imageUrl?: string;
+  imageUrls?: {
+    slow: string;
+    medium: string;
+    fast: string;
+  };
+  qualityScore?: number;
+  feedback?: string;
+  transcription?: string;
+  strengths?: string[];
+  improvements?: string[];
   createdAt: string;
 }
 
