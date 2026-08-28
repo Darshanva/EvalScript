@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useApp } from '../context/AppContext';
 import { Button, Input, Card, Select } from '../components/ui';
 import { supabase } from '../lib/supabase';
@@ -6,47 +6,87 @@ import { loadExamTree } from '../lib/exam-tree';
 
 type Mode = 'login' | 'signup';
 
+/** All Organisation names under every Vertical (admin Exam Structure) */
+function collectOrganisations(tree: Record<string, any>): string[] {
+  const set = new Set<string>();
+  if (!tree || typeof tree !== 'object') return [];
+
+  for (const vertical of Object.keys(tree)) {
+    const node = tree[vertical];
+    if (!node || typeof node !== 'object' || Array.isArray(node)) continue;
+    for (const org of Object.keys(node)) {
+      if (org && org.trim()) set.add(org.trim());
+    }
+  }
+  return [...set].sort((a, b) => a.localeCompare(b));
+}
+
 export default function AuthPage() {
-  const { navigate, setAuthUser, showToast, state } = useApp();
+  const { setAuthUser, showToast, state } = useApp();
   const preselectedRole = (state.navCtx?.role as string) || 'student';
 
   const [mode, setMode] = useState<Mode>('login');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [name, setName] = useState('');
-  const [role, setRole] = useState(preselectedRole === 'admin' ? 'student' : preselectedRole);
+  const [role, setRole] = useState(
+    preselectedRole === 'admin' ? 'student' : preselectedRole
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
-  // Student hierarchy (from Exam Structure)
   const [tree, setTree] = useState<Record<string, any>>({});
-  const [client, setClient] = useState('');
-  const [org, setOrg] = useState('');
-  const [batch, setBatch] = useState('');
-  const [term, setTerm] = useState('');
-  const [section, setSection] = useState('');
+  const [hodOrg, setHodOrg] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      const t = await loadExamTree();
+      if (!cancelled) setTree(t);
+    }
+    load();
+    const onUpd = () => load();
+    window.addEventListener('exam-tree-updated', onUpd);
+    window.addEventListener('storage', onUpd);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('exam-tree-updated', onUpd);
+      window.removeEventListener('storage', onUpd);
+    };
+  }, []);
 
   useEffect(() => {
     if (state.navCtx?.role) {
       const r = state.navCtx.role as string;
-      setRole(r === 'admin' ? 'student' : r);
+      if (r !== 'admin') setRole(r);
       setMode('signup');
     }
   }, [state.navCtx?.role]);
 
-  useEffect(() => {
-    loadExamTree().then(setTree);
-  }, []);
+  const organisations = useMemo(() => collectOrganisations(tree), [tree]);
 
-  const clients = Object.keys(tree);
-  const orgs = client ? Object.keys(tree[client] || {}) : [];
-  const batches = client && org ? Object.keys(tree[client]?.[org] || {}) : [];
-  const terms =
-    client && org && batch ? Object.keys(tree[client]?.[org]?.[batch] || {}) : [];
-  const sections =
-    client && org && batch && term
-      ? Object.keys(tree[client]?.[org]?.[batch]?.[term] || {})
-      : [];
+  async function mapAndSetUser(profile: any, fallbackEmail: string) {
+    const user = {
+      id: profile.id,
+      email: profile.email || fallbackEmail,
+      name: profile.name || 'User',
+      role: (profile.role || 'student') as any,
+      avatarInitials:
+        profile.avatar_initials ||
+        (profile.name || 'U').slice(0, 2).toUpperCase(),
+      studentId: profile.student_id,
+      facultyId: profile.faculty_id,
+      department: profile.department,
+      calibrated: !!profile.calibrated,
+      client: profile.client,
+      organisation: profile.organisation,
+      batch: profile.batch,
+      term: profile.term,
+      section: profile.section,
+    };
+    setAuthUser(user);
+    return user;
+  }
 
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
@@ -64,26 +104,8 @@ export default function AuthPage() {
           .select('*')
           .eq('id', data.user.id)
           .single();
-        const user = {
-          id: data.user.id,
-          email: data.user.email || email,
-          name: profile?.name || data.user.email || 'User',
-          role: (profile?.role || 'student') as 'student' | 'faculty' | 'admin',
-          avatarInitials:
-            profile?.avatar_initials ||
-            (profile?.name || 'U').slice(0, 2).toUpperCase(),
-          studentId: profile?.student_id,
-          facultyId: profile?.faculty_id,
-          department: profile?.department,
-          calibrated: profile?.calibrated || false,
-          client: profile?.client,
-          organisation: profile?.organisation,
-          batch: profile?.batch,
-          term: profile?.term,
-          section: profile?.section,
-        };
-        setAuthUser(user);
-        showToast(`Welcome, ${user.name}`, 'success');
+        await mapAndSetUser(profile || { id: data.user.id, email }, email);
+        showToast('Welcome back', 'success');
       }
     } catch (err: any) {
       setError(err.message || 'Login failed');
@@ -97,12 +119,10 @@ export default function AuthPage() {
     setLoading(true);
     setError('');
 
-    if (role === 'student') {
-      if (!client || !section) {
-        setError('Students must select Client and Section (and Batch/Term if listed).');
-        setLoading(false);
-        return;
-      }
+    if (role === 'hod' && !hodOrg) {
+      setError('HOD must select an Organisation');
+      setLoading(false);
+      return;
     }
 
     try {
@@ -113,6 +133,8 @@ export default function AuthPage() {
           data: {
             name,
             role,
+            organisation: role === 'hod' ? hodOrg : null,
+            client: role === 'hod' ? hodOrg : null,
           },
         },
       });
@@ -135,37 +157,15 @@ export default function AuthPage() {
         calibrated: false,
       };
 
-      if (role === 'student') {
-        profileRow.client = client;
-        profileRow.organisation = org || null;
-        profileRow.batch = batch || null;
-        profileRow.term = term || null;
-        profileRow.section = section;
-        profileRow.department = [client, org, batch, term, section]
-          .filter(Boolean)
-          .join(' › ');
+      if (role === 'hod') {
+        // Scope = Organisation (also stored in client for existing HOD pages)
+        profileRow.organisation = hodOrg;
+        profileRow.client = hodOrg;
+        profileRow.department = `HOD · ${hodOrg}`;
       }
 
-      const { error: profileError } = await supabase
-        .from('profiles')
-        .upsert(profileRow);
-      if (profileError) console.error(profileError);
-
-      const user = {
-        id: data.user.id,
-        email,
-        name,
-        role: role as 'student' | 'faculty' | 'admin',
-        avatarInitials: initials,
-        calibrated: false,
-        client: role === 'student' ? client : undefined,
-        organisation: role === 'student' ? org : undefined,
-        batch: role === 'student' ? batch : undefined,
-        term: role === 'student' ? term : undefined,
-        section: role === 'student' ? section : undefined,
-        department: profileRow.department,
-      };
-      setAuthUser(user);
+      await supabase.from('profiles').upsert(profileRow);
+      await mapAndSetUser({ ...profileRow, id: data.user.id }, email);
       showToast('Account created', 'success');
     } catch (err: any) {
       setError(err.message || 'Registration failed');
@@ -191,8 +191,8 @@ export default function AuthPage() {
             </h1>
             <p className="text-sm text-slate-500 mt-1">
               {mode === 'login'
-                ? 'Access your portal'
-                : 'Register as Student or Faculty'}
+                ? 'Student · Faculty · HOD · Admin'
+                : 'Register — students are assigned to sections by HOD'}
             </p>
           </div>
 
@@ -200,7 +200,7 @@ export default function AuthPage() {
             <button
               type="button"
               className={`flex-1 py-2 rounded-lg text-sm font-medium ${
-                mode === 'login' ? 'bg-white shadow text-slate-900' : 'text-slate-500'
+                mode === 'login' ? 'bg-white shadow' : 'text-slate-500'
               }`}
               onClick={() => setMode('login')}
             >
@@ -209,7 +209,7 @@ export default function AuthPage() {
             <button
               type="button"
               className={`flex-1 py-2 rounded-lg text-sm font-medium ${
-                mode === 'signup' ? 'bg-white shadow text-slate-900' : 'text-slate-500'
+                mode === 'signup' ? 'bg-white shadow' : 'text-slate-500'
               }`}
               onClick={() => setMode('signup')}
             >
@@ -236,82 +236,43 @@ export default function AuthPage() {
                     options={[
                       { value: 'student', label: 'Student' },
                       { value: 'faculty', label: 'Faculty' },
+                      { value: 'hod', label: 'HOD' },
                     ]}
                     value={role}
-                    onChange={(e) => setRole(e.target.value)}
+                    onChange={(e) => {
+                      setRole(e.target.value);
+                      setHodOrg('');
+                    }}
                   />
 
-                  {role === 'student' && (
-                    <div className="space-y-3 p-3 rounded-xl bg-slate-50 border border-slate-200">
-                      <p className="text-xs font-medium text-slate-600">
-                        Your batch / section (from Admin structure)
-                      </p>
+                  {role === 'hod' && (
+                    <div className="space-y-1">
                       <Select
-                        label="Client / Vertical *"
+                        label="Organisation (you are HOD for) *"
                         options={[
-                          { value: '', label: 'Select…' },
-                          ...clients.map((c) => ({ value: c, label: c })),
+                          { value: '', label: 'Select organisation…' },
+                          ...organisations.map((o) => ({
+                            value: o,
+                            label: o,
+                          })),
                         ]}
-                        value={client}
-                        onChange={(e) => {
-                          setClient(e.target.value);
-                          setOrg('');
-                          setBatch('');
-                          setTerm('');
-                          setSection('');
-                        }}
+                        value={hodOrg}
+                        onChange={(e) => setHodOrg(e.target.value)}
                       />
-                      {orgs.length > 0 && (
-                        <Select
-                          label="Organisation"
-                          options={[
-                            { value: '', label: 'Select…' },
-                            ...orgs.map((c) => ({ value: c, label: c })),
-                          ]}
-                          value={org}
-                          onChange={(e) => {
-                            setOrg(e.target.value);
-                            setBatch('');
-                            setTerm('');
-                            setSection('');
-                          }}
-                        />
+                      {organisations.length === 0 && (
+                        <p className="text-xs text-amber-600">
+                          No organisations yet. Admin must add them under Exam
+                          Structure (Vertical → Organisation).
+                        </p>
                       )}
-                      <Select
-                        label="Batch"
-                        options={[
-                          { value: '', label: 'Select…' },
-                          ...batches.map((c) => ({ value: c, label: c })),
-                        ]}
-                        value={batch}
-                        onChange={(e) => {
-                          setBatch(e.target.value);
-                          setTerm('');
-                          setSection('');
-                        }}
-                      />
-                      <Select
-                        label="Term"
-                        options={[
-                          { value: '', label: 'Select…' },
-                          ...terms.map((c) => ({ value: c, label: c })),
-                        ]}
-                        value={term}
-                        onChange={(e) => {
-                          setTerm(e.target.value);
-                          setSection('');
-                        }}
-                      />
-                      <Select
-                        label="Section *"
-                        options={[
-                          { value: '', label: 'Select…' },
-                          ...sections.map((c) => ({ value: c, label: c })),
-                        ]}
-                        value={section}
-                        onChange={(e) => setSection(e.target.value)}
-                      />
                     </div>
+                  )}
+
+                  {role === 'student' && (
+                    <p className="text-xs text-slate-500 bg-slate-50 border border-slate-200 rounded-lg p-3">
+                      After registration, your <strong>HOD</strong> will assign
+                      you to a Batch / Section.
+                    </p>
                   )}
                 </>
               )}
@@ -319,7 +280,6 @@ export default function AuthPage() {
               <Input
                 label="Email address"
                 type="email"
-                placeholder="you@university.edu"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
@@ -328,12 +288,13 @@ export default function AuthPage() {
               <Input
                 label="Password"
                 type="password"
-                placeholder="••••••••"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 required
-                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
                 minLength={6}
+                autoComplete={
+                  mode === 'login' ? 'current-password' : 'new-password'
+                }
               />
 
               {error && (
@@ -347,32 +308,6 @@ export default function AuthPage() {
               </Button>
             </form>
           </Card>
-
-          <p className="text-center text-sm text-slate-500 mt-4">
-            {mode === 'login' ? (
-              <>
-                No account?{' '}
-                <button
-                  type="button"
-                  className="text-navy-700 font-medium"
-                  onClick={() => setMode('signup')}
-                >
-                  Register
-                </button>
-              </>
-            ) : (
-              <>
-                Already have an account?{' '}
-                <button
-                  type="button"
-                  className="text-navy-700 font-medium"
-                  onClick={() => setMode('login')}
-                >
-                  Sign In
-                </button>
-              </>
-            )}
-          </p>
         </div>
       </div>
     </div>

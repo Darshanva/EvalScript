@@ -231,3 +231,24 @@ export interface ResultVersion {
   timestamp: string;
   questionChanges?: unknown;
 }
+
+export type UserRole = 'student' | 'faculty' | 'admin' | 'hod';
+
+export interface User {
+  id: string;
+  email: string;
+  name: string;
+  role: UserRole;
+  avatarInitials: string;
+  studentId?: string;
+  facultyId?: string;
+  department?: string;
+  calibrated?: boolean;
+  createdAt?: string;
+  /** Student placement OR HOD's client scope */
+  client?: string;
+  organisation?: string;
+  batch?: string;
+  term?: string;
+  section?: string;
+}

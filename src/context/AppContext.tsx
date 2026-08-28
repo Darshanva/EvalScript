@@ -644,6 +644,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
       return state.exams.filter((e) => e.facultyId === u.id);
     }
 
+    if (u.role === 'hod') {
+      return state.exams.filter((e) => e.hodId === u.id);
+    }
+
     // student
     const section = (u.section || '').toLowerCase().trim();
     const batch = (u.batch || '').toLowerCase().trim();

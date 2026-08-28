@@ -36,6 +36,11 @@ import GroqSetupPage from './pages/admin/GroqSetupPage';
 import ExamStructurePage from './pages/admin/ExamStructurePage';
 import PublishRightsPage from './pages/admin/PublishRightsPage';
 
+import HodDashboard from './pages/hod/HodDashboard';
+import HodStudentsPage from './pages/hod/HodStudentsPage';
+import HodStructurePage from './pages/hod/HodStructurePage';
+import HodAnalyticsPage from './pages/hod/HodAnalyticsPage';
+
 function NavigationBinder() {
   const navigate = useNavigate();
 
@@ -93,6 +98,14 @@ function ProtectedRoute({
   return <>{children}</>;
 }
 
+function homeForRole(role?: string): string {
+  if (role === 'student') return '/student';
+  if (role === 'faculty') return '/faculty';
+  if (role === 'hod') return '/hod';
+  if (role === 'admin') return '/admin';
+  return '/';
+}
+
 function AppRoutes() {
   const { state, clearToast } = useApp();
   const { currentUser, toast, authLoading } = state;
@@ -108,14 +121,7 @@ function AppRoutes() {
     );
   }
 
-  const home =
-    currentUser?.role === 'student'
-      ? '/student'
-      : currentUser?.role === 'faculty'
-        ? '/faculty'
-        : currentUser?.role === 'admin'
-          ? '/admin'
-          : '/';
+  const home = homeForRole(currentUser?.role);
 
   return (
     <>
@@ -140,6 +146,7 @@ function AppRoutes() {
           }
         />
 
+        {/* Student */}
         <Route
           path="/student"
           element={
@@ -191,6 +198,7 @@ function AppRoutes() {
           }
         />
 
+        {/* Faculty */}
         <Route
           path="/faculty"
           element={
@@ -250,6 +258,49 @@ function AppRoutes() {
           }
         />
 
+        {/* HOD */}
+        <Route
+          path="/hod"
+          element={
+            <ProtectedRoute roles={['hod']}>
+              <AppLayout>
+                <HodDashboard />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/hod/students"
+          element={
+            <ProtectedRoute roles={['hod']}>
+              <AppLayout>
+                <HodStudentsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/hod/structure"
+          element={
+            <ProtectedRoute roles={['hod']}>
+              <AppLayout>
+                <HodStructurePage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/hod/analytics"
+          element={
+            <ProtectedRoute roles={['hod']}>
+              <AppLayout>
+                <HodAnalyticsPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Admin */}
         <Route
           path="/admin"
           element={
@@ -276,6 +327,16 @@ function AppRoutes() {
             <ProtectedRoute roles={['admin']}>
               <AppLayout>
                 <ExamStructurePage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
+        <Route
+          path="/admin/publish-rights"
+          element={
+            <ProtectedRoute roles={['admin']}>
+              <AppLayout>
+                <PublishRightsPage />
               </AppLayout>
             </ProtectedRoute>
           }
@@ -320,16 +381,7 @@ function AppRoutes() {
             </ProtectedRoute>
           }
         />
-        <Route
-  path="/admin/publish-rights"
-  element={
-    <ProtectedRoute roles={['admin']}>
-      <AppLayout>
-        <PublishRightsPage />
-      </AppLayout>
-    </ProtectedRoute>
-  }
-/>
+
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
 

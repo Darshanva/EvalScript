@@ -36,9 +36,17 @@ const ADMIN_NAV: NavItem[] = [
   { path: '/admin/publish-rights', label: 'Publish Rights', icon: '☑' },
 ];
 
+const HOD_NAV: NavItem[] = [
+  { path: '/hod', label: 'Dashboard', icon: '⊞' },
+  { path: '/hod/students', label: 'Students', icon: '⋯' },
+  { path: '/hod/structure', label: 'Structure', icon: '▤' },
+  { path: '/hod/analytics', label: 'Analytics', icon: '≋' },
+];
+
 function getNavItems(role: string): NavItem[] {
   if (role === 'student') return STUDENT_NAV;
   if (role === 'faculty') return FACULTY_NAV;
+  if (role === 'hod') return HOD_NAV;
   return ADMIN_NAV;
 }
 
