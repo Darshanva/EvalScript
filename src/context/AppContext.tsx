@@ -132,8 +132,18 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return { ...state, toast: { message: action.message, type: action.toastType } };
     case 'CLEAR_TOAST':
       return { ...state, toast: null };
-    case 'ADD_SUBMISSION':
-      return { ...state, submissions: [...state.submissions, action.submission] };
+    case 'ADD_SUBMISSION': {
+      const exists = state.submissions.some((s) => s.id === action.submission.id);
+      if (exists) {
+        return {
+          ...state,
+          submissions: state.submissions.map((s) =>
+            s.id === action.submission.id ? action.submission : s
+          ),
+        };
+      }
+      return { ...state, submissions: [action.submission, ...state.submissions] };
+    }
     case 'UPDATE_SUBMISSION_STATUS':
       return {
         ...state,
@@ -145,11 +155,23 @@ function appReducer(state: AppState, action: AppAction): AppState {
       return {
         ...state,
         submissions: state.submissions.map((s) =>
-          s.id === action.submissionId ? { ...s, evaluationId: action.evaluationId } : s
+          s.id === action.submissionId
+            ? { ...s, evaluationId: action.evaluationId }
+            : s
         ),
       };
-    case 'ADD_EVALUATION':
-      return { ...state, evaluations: [...state.evaluations, action.evaluation] };
+    case 'ADD_EVALUATION': {
+      const exists = state.evaluations.some((e) => e.id === action.evaluation.id);
+      if (exists) {
+        return {
+          ...state,
+          evaluations: state.evaluations.map((e) =>
+            e.id === action.evaluation.id ? action.evaluation : e
+          ),
+        };
+      }
+      return { ...state, evaluations: [action.evaluation, ...state.evaluations] };
+    }
     case 'UPDATE_EVALUATION':
       return {
         ...state,
@@ -175,7 +197,9 @@ function appReducer(state: AppState, action: AppAction): AppState {
     case 'UPDATE_RUBRIC':
       return {
         ...state,
-        rubrics: state.rubrics.map((r) => (r.id === action.rubric.id ? action.rubric : r)),
+        rubrics: state.rubrics.map((r) =>
+          r.id === action.rubric.id ? action.rubric : r
+        ),
       };
     case 'ADD_CALIBRATION':
       return { ...state, calibrations: [...state.calibrations, action.calibration] };
@@ -272,7 +296,11 @@ interface AppContextValue {
   addAuditLog: (log: Omit<AuditLog, 'id' | 'timestamp'>) => void;
   updateSystemSettings: (settings: SystemSettings) => void;
   submitDispute: (dispute: Omit<DisputeRequest, 'id' | 'createdAt' | 'status'>) => void;
-  resolveDispute: (disputeId: string, resolution: string, status: 'RESOLVED' | 'REJECTED') => void;
+  resolveDispute: (
+    disputeId: string,
+    resolution: string,
+    status: 'RESOLVED' | 'REJECTED'
+  ) => void;
   createResultVersion: (
     evaluationId: string,
     reason: string,
@@ -283,9 +311,20 @@ interface AppContextValue {
   getEvaluationsForCurrentUser: () => Evaluation[];
   getPendingReviewsForFaculty: () => Evaluation[];
   getCalibrationForStudent: (studentId: string) => CalibrationSample | undefined;
+  reloadCloudData: () => Promise<void>;
 }
 
 const AppContext = createContext<AppContextValue | null>(null);
+
+function facultyExamIds(exams: Exam[], user: User): Set<string> {
+  const ids = new Set<string>();
+  exams.forEach((e) => {
+    if (e.facultyId === user.id || e.facultyName === user.name) {
+      ids.add(e.id);
+    }
+  });
+  return ids;
+}
 
 async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
   const [subs, evals, exams, logs] = await Promise.all([
@@ -308,7 +347,7 @@ async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
     payload: {
       submissions: subs,
       evaluations: evals,
-      exams: exams,
+      exams,
       users,
       auditLogs: logs,
     },
@@ -330,16 +369,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       if (session?.user && mounted) {
         const profile = await ensureProfile(session.user);
         if (profile) {
-          // ensureProfile may omit new fields — re-map from DB if needed
-          const enriched = {
-            ...profile,
-            client: (profile as User).client,
-            organisation: (profile as User).organisation,
-            batch: (profile as User).batch,
-            term: (profile as User).term,
-            section: (profile as User).section,
-          };
-          dispatch({ type: 'LOGIN_SUCCESS', user: enriched });
+          dispatch({ type: 'LOGIN_SUCCESS', user: profile as User });
           await loadCloudData(dispatch);
         }
       }
@@ -369,17 +399,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  const navigate = useCallback((page: PageRoute | string, navCtx?: NavigationContext) => {
-    const path = toPath(page);
-    dispatch({ type: 'NAVIGATE', page: page as PageRoute, navCtx });
-    if (navigationRef.current) {
-      navigationRef.current(path);
-    }
+  const reloadCloudData = useCallback(async () => {
+    await loadCloudData(dispatch);
   }, []);
 
+  const navigate = useCallback(
+    (page: PageRoute | string, navCtx?: NavigationContext) => {
+      const path = toPath(page);
+      dispatch({ type: 'NAVIGATE', page: page as PageRoute, navCtx });
+      if (navigationRef.current) {
+        navigationRef.current(path);
+      }
+    },
+    []
+  );
+
   const setAuthUser = useCallback((user: User | null) => {
-    if (user) dispatch({ type: 'LOGIN_SUCCESS', user });
-    else dispatch({ type: 'LOGOUT' });
+    if (user) {
+      dispatch({ type: 'LOGIN_SUCCESS', user });
+      loadCloudData(dispatch);
+    } else {
+      dispatch({ type: 'LOGOUT' });
+    }
   }, []);
 
   const logout = useCallback(async () => {
@@ -413,19 +454,64 @@ export function AppProvider({ children }: { children: ReactNode }) {
     try {
       await saveSubmission(submission);
     } catch (e) {
-      console.error(e);
+      console.error('submitExam cloud save failed', e);
+      throw e;
     }
   }, []);
 
   const processEvaluation = useCallback(
     (submissionId: string) => {
       const submission = state.submissions.find((s) => s.id === submissionId);
-      if (!submission) return;
+      if (!submission) {
+        console.warn('processEvaluation: submission not found', submissionId);
+        return;
+      }
       const exam = state.exams.find((e) => e.id === submission.examId);
-      const rubric = state.rubrics.find((r) => r.examId === submission.examId);
-      if (!exam || !rubric) return;
+      if (!exam) {
+        console.warn('processEvaluation: exam not found', submission.examId);
+        dispatch({
+          type: 'SHOW_TOAST',
+          message: 'Exam not found for this submission',
+          toastType: 'error',
+        });
+        return;
+      }
 
-      dispatch({ type: 'UPDATE_SUBMISSION_STATUS', submissionId, status: 'PROCESSING' });
+      let rubric =
+        state.rubrics.find((r) => r.examId === submission.examId) ||
+        state.rubrics.find((r) => r.id === exam.rubricId);
+
+      if (!rubric) {
+        // Minimal rubric so pipeline continues
+        rubric = {
+          id: exam.rubricId || `rubric-auto-${exam.id}`,
+          examId: exam.id,
+          questions: [
+            {
+              id: 'q1',
+              number: '1',
+              questionText: 'Overall answer quality',
+              maxMarks: exam.maxMarks || 100,
+              criteria: [
+                {
+                  id: 'c1',
+                  description: 'Content and clarity',
+                  maxMarks: exam.maxMarks || 100,
+                },
+              ],
+            },
+          ],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        dispatch({ type: 'ADD_RUBRIC', rubric });
+      }
+
+      dispatch({
+        type: 'UPDATE_SUBMISSION_STATUS',
+        submissionId,
+        status: 'PROCESSING',
+      });
       updateSubmissionStatus(submissionId, 'PROCESSING').catch(console.error);
 
       const calibration = state.calibrations.find(
@@ -444,19 +530,31 @@ export function AppProvider({ children }: { children: ReactNode }) {
           if (useClaude) {
             evaluation = await runClaudeEvaluation({
               submission,
-              rubric,
+              rubric: rubric!,
               examTitle: `${exam.title} (${exam.code})`,
               studentName: submission.studentName || 'Student',
-              calibrationImageUrl: calibration?.imageUrl,
+              calibrationImageUrl:
+                calibration?.imageUrl || calibration?.imageUrls?.slow,
             });
           } else {
             evaluation = runDemoEvaluation({
               submission,
-              rubric,
+              rubric: rubric!,
               examTitle: `${exam.title} (${exam.code})`,
               studentName: submission.studentName || 'Student',
             });
           }
+
+          // Ensure faculty can find it
+          evaluation = {
+            ...evaluation,
+            examId: submission.examId,
+            submissionId: submission.id,
+            studentId: submission.studentId,
+            studentName: submission.studentName,
+            examTitle: evaluation.examTitle || exam.title,
+            status: evaluation.status || 'AI_COMPLETE',
+          };
 
           dispatch({ type: 'ADD_EVALUATION', evaluation });
           dispatch({
@@ -478,7 +576,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
               evaluation.id
             );
           } catch (e) {
-            console.error(e);
+            console.error('save evaluation failed', e);
           }
 
           if (state.currentUser) {
@@ -493,11 +591,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
             });
           }
         } catch (e) {
-          console.error(e);
+          console.error('processEvaluation failed', e);
           dispatch({
             type: 'UPDATE_SUBMISSION_STATUS',
             submissionId,
             status: 'SUBMITTED',
+          });
+          updateSubmissionStatus(submissionId, 'SUBMITTED').catch(console.error);
+          dispatch({
+            type: 'SHOW_TOAST',
+            message: 'AI evaluation failed — submission kept in queue',
+            toastType: 'error',
           });
         }
       })();
@@ -532,7 +636,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         publishedAt: new Date().toISOString(),
         facultyId: state.currentUser.id,
         facultyName: state.currentUser.name,
-        facultyReviewedAt: evaluation.facultyReviewedAt ?? new Date().toISOString(),
+        facultyReviewedAt:
+          evaluation.facultyReviewedAt ?? new Date().toISOString(),
         facultyNotes: facultyNotes ?? evaluation.facultyNotes,
       };
       dispatch({ type: 'UPDATE_EVALUATION', evaluation: updatedEval });
@@ -633,7 +738,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  /** Student sees exams for their Client/Batch/Term/Section path */
   const getExamsForCurrentUser = useCallback((): Exam[] => {
     const u = state.currentUser;
     if (!u) return [];
@@ -641,59 +745,68 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (u.role === 'admin') return state.exams;
 
     if (u.role === 'faculty') {
-      return state.exams.filter((e) => e.facultyId === u.id);
+      return state.exams.filter(
+        (e) => e.facultyId === u.id || e.facultyName === u.name
+      );
     }
 
     if (u.role === 'hod') {
-      return state.exams.filter((e) => e.hodId === u.id);
+      const c = (u.client || u.organisation || '').toLowerCase();
+      if (!c) return state.exams;
+      return state.exams.filter((e) =>
+        `${e.description || ''} ${e.title || ''}`.toLowerCase().includes(c)
+      );
     }
 
-    // student
-    const section = (u.section || '').toLowerCase().trim();
-    const batch = (u.batch || '').toLowerCase().trim();
-    const term = (u.term || '').toLowerCase().trim();
-    const client = (u.client || '').toLowerCase().trim();
-    const org = (u.organisation || '').toLowerCase().trim();
+    // student — section / batch match
+    if (u.role === 'student') {
+      const section = (u.section || '').toLowerCase().trim();
+      const batch = (u.batch || '').toLowerCase().trim();
+      const term = (u.term || '').toLowerCase().trim();
+      const client = (u.client || '').toLowerCase().trim();
+      const org = (u.organisation || '').toLowerCase().trim();
 
-    return state.exams.filter((exam) => {
-      const status = (exam.status || 'ACTIVE').toUpperCase();
-      if (status !== 'ACTIVE' && status !== 'OPEN') return false;
+      return state.exams.filter((exam) => {
+        const status = (exam.status || 'ACTIVE').toUpperCase();
+        if (status !== 'ACTIVE' && status !== 'OPEN') return false;
 
-      if (exam.studentIds?.length && exam.studentIds.includes(u.id)) {
-        return true;
-      }
-
-      const hay =
-        `${exam.description || ''} ${exam.title || ''} ${exam.code || ''}`.toLowerCase();
-
-      if (section) {
-        const sectionHit =
-          hay.includes(section) ||
-          hay.includes(`section ${section}`) ||
-          hay.includes(`section${section}`);
-        if (!sectionHit) return false;
-        if (batch && hay.includes('batch') && !hay.includes(batch)) {
-          // section matched; batch soft-check only
+        if (exam.studentIds?.length && exam.studentIds.includes(u.id)) {
+          return true;
         }
-        return true;
-      }
 
-      const parts = [client, org, batch, term].filter(Boolean);
-      if (!parts.length) return true;
-      return parts.every((p) => hay.includes(p));
-    });
+        const hay =
+          `${exam.description || ''} ${exam.title || ''} ${exam.code || ''}`.toLowerCase();
+
+        if (section) {
+          return (
+            hay.includes(section) ||
+            hay.includes(`section ${section}`) ||
+            hay.includes(`section${section}`)
+          );
+        }
+
+        const parts = [client, org, batch, term].filter(Boolean);
+        if (!parts.length) return true;
+        return parts.every((p) => hay.includes(p));
+      });
+    }
+
+    return [];
   }, [state.currentUser, state.exams]);
 
   const getSubmissionsForCurrentUser = useCallback((): Submission[] => {
     if (!state.currentUser) return [];
     if (state.currentUser.role === 'student') {
-      return state.submissions.filter((s) => s.studentId === state.currentUser!.id);
+      return state.submissions.filter(
+        (s) => s.studentId === state.currentUser!.id
+      );
     }
     if (state.currentUser.role === 'faculty') {
-      const ids = state.exams
-        .filter((e) => e.facultyId === state.currentUser!.id)
-        .map((e) => e.id);
-      return state.submissions.filter((s) => ids.includes(s.examId));
+      const ids = facultyExamIds(state.exams, state.currentUser);
+      return state.submissions.filter((s) => ids.has(s.examId));
+    }
+    if (state.currentUser.role === 'admin') {
+      return state.submissions;
     }
     return state.submissions;
   }, [state.currentUser, state.exams, state.submissions]);
@@ -702,32 +815,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (!state.currentUser) return [];
     if (state.currentUser.role === 'student') {
       return state.evaluations.filter(
-        (e) => e.studentId === state.currentUser!.id && e.status === 'PUBLISHED'
+        (e) =>
+          e.studentId === state.currentUser!.id && e.status === 'PUBLISHED'
       );
     }
     if (state.currentUser.role === 'faculty') {
-      const ids = state.exams
-        .filter((e) => e.facultyId === state.currentUser!.id)
-        .map((e) => e.id);
-      return state.evaluations.filter((e) => ids.includes(e.examId));
+      const ids = facultyExamIds(state.exams, state.currentUser);
+      return state.evaluations.filter((e) => ids.has(e.examId));
     }
     return state.evaluations;
   }, [state.currentUser, state.exams, state.evaluations]);
 
   const getPendingReviewsForFaculty = useCallback((): Evaluation[] => {
     if (!state.currentUser || state.currentUser.role !== 'faculty') return [];
-    const ids = state.exams
-      .filter((e) => e.facultyId === state.currentUser!.id)
-      .map((e) => e.id);
+    const ids = facultyExamIds(state.exams, state.currentUser);
     return state.evaluations.filter(
       (e) =>
-        ids.includes(e.examId) &&
-        (e.status === 'AI_COMPLETE' || e.status === 'FACULTY_REVIEW')
+        ids.has(e.examId) &&
+        (e.status === 'AI_COMPLETE' ||
+          e.status === 'FACULTY_REVIEW' ||
+          e.status === 'REVIEWED')
     );
   }, [state.currentUser, state.exams, state.evaluations]);
 
   const getCalibrationForStudent = useCallback(
-    (studentId: string) => state.calibrations.find((c) => c.studentId === studentId),
+    (studentId: string) =>
+      state.calibrations.find((c) => c.studentId === studentId),
     [state.calibrations]
   );
 
@@ -747,7 +860,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   );
 
   const resolveDispute = useCallback(
-    (disputeId: string, resolution: string, status: 'RESOLVED' | 'REJECTED') => {
+    (
+      disputeId: string,
+      resolution: string,
+      status: 'RESOLVED' | 'REJECTED'
+    ) => {
       const dispute = state.disputes.find((d) => d.id === disputeId);
       if (!dispute || !state.currentUser) return;
       dispatch({
@@ -772,7 +889,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       questionChanges: ResultVersion['questionChanges']
     ) => {
       if (!state.currentUser) return;
-      const existing = state.resultVersions.filter((v) => v.evaluationId === evaluationId);
+      const existing = state.resultVersions.filter(
+        (v) => v.evaluationId === evaluationId
+      );
       const evaluation = state.evaluations.find((e) => e.id === evaluationId);
       if (!evaluation) return;
       dispatch({
@@ -822,6 +941,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         getEvaluationsForCurrentUser,
         getPendingReviewsForFaculty,
         getCalibrationForStudent,
+        reloadCloudData,
       }}
     >
       {children}

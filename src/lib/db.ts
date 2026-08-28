@@ -175,16 +175,17 @@ function mapSubmission(row: any): Submission {
   return {
     id: row.id,
     examId: row.exam_id,
-    examTitle: row.exam_title,
-    examCode: row.exam_code,
+    examTitle: row.exam_title || '',
+    examCode: row.exam_code || '',
     studentId: row.student_id,
-    studentName: row.student_name,
-    pages: row.pages || [],
-    pageCount: row.page_count ?? (row.pages || []).length,
+    studentName: row.student_name || '',
+    pages: Array.isArray(row.pages) ? row.pages : [],
+    pageCount: row.page_count ?? (Array.isArray(row.pages) ? row.pages.length : 0),
     status: row.status || 'SUBMITTED',
     submittedAt: row.submitted_at || row.created_at,
     createdAt: row.created_at,
-  };
+    evaluationId: row.evaluation_id || undefined,
+  } as Submission;
 }
 
 export async function fetchSubmissions(): Promise<Submission[]> {
@@ -203,14 +204,14 @@ export async function saveSubmission(submission: Submission): Promise<void> {
   const row = {
     id: submission.id,
     exam_id: submission.examId,
-    exam_title: submission.examTitle,
-    exam_code: submission.examCode,
+    exam_title: submission.examTitle || null,
+    exam_code: submission.examCode || null,
     student_id: submission.studentId,
     student_name: submission.studentName,
-    pages: submission.pages,
-    page_count: submission.pageCount,
-    status: submission.status,
-    submitted_at: submission.submittedAt,
+    pages: submission.pages || [],
+    page_count: submission.pageCount ?? submission.pages?.length ?? 0,
+    status: submission.status || 'SUBMITTED',
+    submitted_at: submission.submittedAt || new Date().toISOString(),
     created_at: submission.createdAt || new Date().toISOString(),
   };
   const { error } = await supabase.from('submissions').upsert(row);
