@@ -38,11 +38,7 @@ export default function ExamStructurePage() {
     refresh();
     const onUpd = () => refresh();
     window.addEventListener('exam-tree-updated', onUpd);
-    window.addEventListener('storage', onUpd);
-    return () => {
-      window.removeEventListener('exam-tree-updated', onUpd);
-      window.removeEventListener('storage', onUpd);
-    };
+    return () => window.removeEventListener('exam-tree-updated', onUpd);
   }, [refresh]);
 
   const items = getItemsAtLevel(tree, level, path);
@@ -60,7 +56,14 @@ export default function ExamStructurePage() {
       setPath({ ...EMPTY_PATH, vertical: name });
       setLevel('org');
     } else if (level === 'org') {
-      setPath((p) => ({ ...p, org: name, batch: '', term: '', section: '', subject: '' }));
+      setPath((p) => ({
+        ...p,
+        org: name,
+        batch: '',
+        term: '',
+        section: '',
+        subject: '',
+      }));
       setLevel('batch');
     } else if (level === 'batch') {
       setPath((p) => ({ ...p, batch: name, term: '', section: '', subject: '' }));
@@ -87,23 +90,21 @@ export default function ExamStructurePage() {
 
   function goBack() {
     if (level === 'subject') {
-      setPath((p) => ({ ...p, section: '' }));
+      setPath((p) => ({ ...p, subject: '' }));
       setLevel('section');
     } else if (level === 'section') {
-      setPath((p) => ({ ...p, term: '' }));
+      setPath((p) => ({ ...p, section: '' }));
       setLevel('term');
     } else if (level === 'term') {
-      setPath((p) => ({ ...p, batch: '' }));
+      setPath((p) => ({ ...p, term: '' }));
       setLevel('batch');
     } else if (level === 'batch') {
-      setPath((p) => ({ ...p, org: '' }));
+      setPath((p) => ({ ...p, batch: '' }));
       setLevel('org');
     } else if (level === 'org') {
       setPath({ ...EMPTY_PATH });
       setLevel('vertical');
-    } else {
-      navigate('/admin');
-    }
+    } else navigate('/admin');
   }
 
   async function handleAdd() {
@@ -113,45 +114,32 @@ export default function ExamStructurePage() {
       return;
     }
 
-    // Support both return shapes
-    const raw: any = addTreeItem(tree, level, path, name);
-    const ok = raw?.ok !== false;
-    const nextTree = raw?.tree ?? raw;
-    const errMsg = raw?.error;
+    console.log('ADD', { level, path, name, tree });
 
-    if (!ok || !nextTree || typeof nextTree !== 'object') {
-      showToast(errMsg || 'Could not add — check you opened the right folder', 'error');
+    const result = addTreeItem(tree, level, path, name);
+    if (!result.ok) {
+      showToast(result.error || 'Add failed', 'error');
+      console.error('addTreeItem failed', result);
       return;
     }
 
-    // Verify item actually present
-    const check = getItemsAtLevel(nextTree, level, path);
-    if (!check.includes(name)) {
-      console.error('addTreeItem did not insert', { level, path, name, nextTree });
-      showToast(
-        'Add failed internally. Open Section again, then + Add Subject.',
-        'error'
-      );
+    const check = getItemsAtLevel(result.tree, level, path);
+    console.log('AFTER ADD keys', check);
+
+    if (!check.some((k) => k.toLowerCase() === name.toLowerCase())) {
+      showToast('Add failed — path mismatch. Go Back to Section and retry.', 'error');
+      console.error('verify failed', { path, level, check, tree: result.tree });
       return;
     }
 
     setSaving(true);
     try {
-      setTree(nextTree);
-      await saveExamTree(nextTree);
+      setTree(result.tree);
+      await saveExamTree(result.tree);
       setNewName('');
       setAdding(false);
-      showToast(`Added “${name}” — visible to Faculty`, 'success');
-      // Re-load from cloud to confirm persist
-      const confirmed = await loadExamTree();
-      setTree(confirmed);
-      const after = getItemsAtLevel(confirmed, level, path);
-      if (!after.includes(name)) {
-        showToast(
-          'Saved locally but cloud may have failed — check app_settings table',
-          'error'
-        );
-      }
+      showToast(`Added “${name}”`, 'success');
+      await refresh();
     } catch (e: any) {
       showToast(e?.message || 'Cloud save failed', 'error');
     } finally {
@@ -161,20 +149,18 @@ export default function ExamStructurePage() {
 
   async function handleDelete(name: string) {
     if (!window.confirm(`Delete “${name}”?`)) return;
-    const raw: any = deleteTreeItem(tree, level, path, name);
-    const nextTree = raw?.tree ?? raw;
-    if (!nextTree) {
-      showToast('Delete failed', 'error');
+    const result = deleteTreeItem(tree, level, path, name);
+    if (!result.ok) {
+      showToast(result.error || 'Delete failed', 'error');
       return;
     }
     try {
-      setTree(nextTree);
-      await saveExamTree(nextTree);
+      setTree(result.tree);
+      await saveExamTree(result.tree);
       showToast('Deleted', 'success');
-      const confirmed = await loadExamTree();
-      setTree(confirmed);
+      await refresh();
     } catch (e: any) {
-      showToast(e?.message || 'Delete save failed', 'error');
+      showToast(e?.message || 'Save failed', 'error');
     }
   }
 
@@ -182,28 +168,20 @@ export default function ExamStructurePage() {
     <PageContainer>
       <PageHeader
         title="Exam Structure"
-        subtitle="Add / delete folders. Faculty only browses this tree when creating exams."
+        subtitle="Add / delete folders. Faculty browses this tree when creating exams."
         breadcrumb="Admin"
         showBack
         backTo="/admin"
       />
 
       <div className="mb-4 flex flex-wrap items-center gap-1 text-sm text-slate-500">
-        <button
-          type="button"
-          className="text-navy-600 hover:underline"
-          onClick={() => jumpCrumb(-1)}
-        >
+        <button type="button" className="text-navy-600 hover:underline" onClick={() => jumpCrumb(-1)}>
           Root
         </button>
         {crumbs.map((part, i) => (
           <span key={i} className="flex items-center gap-1">
             <span className="text-slate-300">›</span>
-            <button
-              type="button"
-              className="font-medium text-navy-700 hover:underline"
-              onClick={() => jumpCrumb(i)}
-            >
+            <button type="button" className="font-medium text-navy-700 hover:underline" onClick={() => jumpCrumb(i)}>
               {part}
             </button>
           </span>
@@ -211,9 +189,7 @@ export default function ExamStructurePage() {
       </div>
 
       <div className="flex flex-wrap items-center gap-2 mb-4">
-        <Button variant="ghost" size="sm" onClick={goBack}>
-          ← Back
-        </Button>
+        <Button variant="ghost" size="sm" onClick={goBack}>← Back</Button>
         <Badge variant="navy">{LEVEL_TITLES[level]}</Badge>
         <Badge variant="muted">{items.length}</Badge>
         <div className="flex-1" />
@@ -228,59 +204,34 @@ export default function ExamStructurePage() {
             label={`New ${LEVEL_TITLES[level]}`}
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
-            placeholder="e.g. Subject 1"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleAdd();
-            }}
+            placeholder="Name"
+            onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
           />
-          <Button loading={saving} onClick={handleAdd}>
-            Add
-          </Button>
-          <Button variant="ghost" onClick={() => setAdding(false)}>
-            Cancel
-          </Button>
+          <Button loading={saving} onClick={handleAdd}>Add</Button>
+          <Button variant="ghost" onClick={() => setAdding(false)}>Cancel</Button>
         </Card>
       )}
 
       {loading ? (
-        <Card>
-          <p className="text-sm text-slate-400 text-center py-10">Loading…</p>
-        </Card>
+        <Card><p className="text-sm text-slate-400 text-center py-10">Loading…</p></Card>
       ) : items.length === 0 ? (
         <Card>
           <p className="text-sm text-slate-400 text-center py-10">
             Empty. Click + Add {LEVEL_TITLES[level]}.
           </p>
-          {level === 'subject' && !path.section && (
-            <p className="text-xs text-amber-600 text-center pb-4">
-              Open a Section first, then add subjects.
-            </p>
-          )}
         </Card>
       ) : (
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
           {items.map((name) => (
-            <div
-              key={name}
-              className="p-4 border-2 border-slate-200 rounded-xl bg-white hover:border-navy-300"
-            >
+            <div key={name} className="p-4 border-2 border-slate-200 rounded-xl bg-white">
               <p className="font-semibold text-slate-900">{name}</p>
               <div className="flex gap-2 mt-3">
                 {level !== 'subject' && (
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    onClick={() => openItem(name)}
-                  >
+                  <Button size="sm" variant="secondary" onClick={() => openItem(name)}>
                     Open
                   </Button>
                 )}
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="text-red-600"
-                  onClick={() => handleDelete(name)}
-                >
+                <Button size="sm" variant="ghost" className="text-red-600" onClick={() => handleDelete(name)}>
                   Delete
                 </Button>
               </div>

@@ -39,13 +39,11 @@ const STORAGE_KEY = 'evalscript_exam_tree';
 const SETTINGS_KEY = 'exam_tree';
 
 export const DEFAULT_EXAM_TREE: Record<string, any> = {
-  'Select Vertical / Client': {
+  'select vertical/client': {
     'HDFC Bank': {
       Batch1: {
         'Term 1': {
-          'Section A': {
-            Subject1: {},
-          },
+          'Section 1': {},
         },
       },
     },
@@ -64,33 +62,63 @@ function notify() {
   }
 }
 
-/** Ensure nested object path exists */
-function ensurePath(
+/** Find actual key in object ignoring case/spaces */
+function findKey(obj: Record<string, any> | null | undefined, want: string): string | null {
+  if (!obj || !want) return null;
+  if (want in obj) return want;
+  const w = want.trim().toLowerCase();
+  for (const k of Object.keys(obj)) {
+    if (k.trim().toLowerCase() === w) return k;
+  }
+  return null;
+}
+
+/**
+ * Walk tree following path segments for levels before `level`.
+ * Returns { parent, keyUsed } where parent is the object that should hold children at `level`.
+ */
+function getParentNode(
   tree: Record<string, any>,
-  path: TreePath,
-  upTo: TreeLevel
-): Record<string, any> | null {
-  const order: TreeLevel[] = [
-    'vertical',
-    'org',
-    'batch',
-    'term',
-    'section',
-    'subject',
-  ];
-  const need = order.indexOf(upTo);
+  level: TreeLevel,
+  path: TreePath
+): { parent: Record<string, any> | null; resolved: TreePath } {
+  const resolved: TreePath = { ...EMPTY_PATH };
   let node: any = tree;
 
-  for (let i = 0; i < need; i++) {
-    const key = order[i];
-    const name = path[key];
-    if (!name) return null;
-    if (!node[name] || typeof node[name] !== 'object') {
-      node[name] = {};
-    }
-    node = node[name];
+  const chain: { level: TreeLevel; pathKey: keyof TreePath }[] = [
+    { level: 'vertical', pathKey: 'vertical' },
+    { level: 'org', pathKey: 'org' },
+    { level: 'batch', pathKey: 'batch' },
+    { level: 'term', pathKey: 'term' },
+    { level: 'section', pathKey: 'section' },
+    { level: 'subject', pathKey: 'subject' },
+  ];
+
+  const targetIdx = chain.findIndex((c) => c.level === level);
+  if (targetIdx < 0) return { parent: null, resolved };
+
+  // For vertical level, parent is the root tree itself
+  if (level === 'vertical') {
+    return { parent: tree, resolved };
   }
-  return node;
+
+  // Walk all segments BEFORE this level
+  for (let i = 0; i < targetIdx; i++) {
+    const { pathKey } = chain[i];
+    const want = path[pathKey];
+    if (!want || !node || typeof node !== 'object') {
+      return { parent: null, resolved };
+    }
+    const actual = findKey(node, want);
+    if (!actual) return { parent: null, resolved };
+    resolved[pathKey] = actual;
+    node = node[actual];
+  }
+
+  if (!node || typeof node !== 'object' || Array.isArray(node)) {
+    return { parent: null, resolved };
+  }
+  return { parent: node, resolved };
 }
 
 export async function loadExamTree(): Promise<Record<string, any>> {
@@ -100,7 +128,6 @@ export async function loadExamTree(): Promise<Record<string, any>> {
       .select('value')
       .eq('key', SETTINGS_KEY)
       .maybeSingle();
-
     if (!error && data?.value && typeof data.value === 'object') {
       const tree = data.value as Record<string, any>;
       if (Object.keys(tree).length > 0) {
@@ -139,11 +166,8 @@ export async function saveExamTree(tree: Record<string, any>): Promise<void> {
   });
 
   if (error) {
-    console.error('saveExamTree cloud', error);
-    throw new Error(
-      error.message ||
-        'Could not save structure to cloud. Check app_settings table + RLS.'
-    );
+    console.error('saveExamTree', error);
+    throw new Error(error.message || 'Cloud save failed — check app_settings RLS');
   }
 }
 
@@ -153,43 +177,11 @@ export function getItemsAtLevel(
   path: TreePath
 ): string[] {
   if (!tree) return [];
-
-  if (level === 'vertical') {
-    return Object.keys(tree);
-  }
-
-  const parentLevel: Record<TreeLevel, TreeLevel | null> = {
-    vertical: null,
-    org: 'vertical',
-    batch: 'org',
-    term: 'batch',
-    section: 'term',
-    subject: 'section',
-  };
-
-  const parent = parentLevel[level];
+  const { parent } = getParentNode(tree, level, path);
   if (!parent) return [];
-
-  // Walk to parent container
-  let node: any = tree;
-  const walk: TreeLevel[] = ['vertical', 'org', 'batch', 'term', 'section'];
-  const stop = walk.indexOf(parent);
-
-  for (let i = 0; i <= stop; i++) {
-    const k = walk[i];
-    const name = path[k];
-    if (!name || !node || typeof node !== 'object') return [];
-    node = node[name];
-  }
-
-  if (!node || typeof node !== 'object' || Array.isArray(node)) return [];
-  return Object.keys(node);
+  return Object.keys(parent);
 }
 
-/**
- * Add item. Creates missing parents if possible.
- * Returns { tree, ok, error }
- */
 export function addTreeItem(
   tree: Record<string, any>,
   level: TreeLevel,
@@ -200,72 +192,24 @@ export function addTreeItem(
   if (!n) return { tree, ok: false, error: 'Name required' };
 
   const next = clone(tree);
+  const { parent } = getParentNode(next, level, path);
 
-  if (level === 'vertical') {
-    if (!next[n]) next[n] = {};
-    return { tree: next, ok: true };
+  if (!parent) {
+    return {
+      tree,
+      ok: false,
+      error: `Path incomplete for ${level}. Open the parent folder again.`,
+    };
   }
 
-  if (level === 'org') {
-    if (!path.vertical) {
-      return { tree, ok: false, error: 'Select vertical first' };
-    }
-    if (!next[path.vertical]) next[path.vertical] = {};
-    if (!next[path.vertical][n]) next[path.vertical][n] = {};
-    return { tree: next, ok: true };
+  // already exists (case-insensitive)
+  const existing = findKey(parent, n);
+  if (existing) {
+    return { tree: next, ok: true }; // treat as success
   }
 
-  if (level === 'batch') {
-    if (!path.vertical || !path.org) {
-      return { tree, ok: false, error: 'Select vertical + organisation first' };
-    }
-    const parent = ensurePath(next, path, 'batch');
-    if (!parent) return { tree, ok: false, error: 'Invalid path' };
-    if (!parent[n]) parent[n] = {};
-    return { tree: next, ok: true };
-  }
-
-  if (level === 'term') {
-    if (!path.batch) {
-      return { tree, ok: false, error: 'Select batch first' };
-    }
-    const parent = ensurePath(next, path, 'term');
-    if (!parent) return { tree, ok: false, error: 'Invalid path' };
-    if (!parent[n]) parent[n] = {};
-    return { tree: next, ok: true };
-  }
-
-  if (level === 'section') {
-    if (!path.term) {
-      return { tree, ok: false, error: 'Select term first' };
-    }
-    const parent = ensurePath(next, path, 'section');
-    if (!parent) return { tree, ok: false, error: 'Invalid path' };
-    if (!parent[n]) parent[n] = {};
-    return { tree: next, ok: true };
-  }
-
-  if (level === 'subject') {
-    if (!path.section) {
-      return {
-        tree,
-        ok: false,
-        error: 'Open a Section first, then add Subject',
-      };
-    }
-    const parent = ensurePath(next, path, 'subject');
-    if (!parent) {
-      return {
-        tree,
-        ok: false,
-        error: 'Path incomplete — go Section level and retry',
-      };
-    }
-    if (!parent[n]) parent[n] = {};
-    return { tree: next, ok: true };
-  }
-
-  return { tree, ok: false, error: 'Unknown level' };
+  parent[n] = {};
+  return { tree: next, ok: true };
 }
 
 export function deleteTreeItem(
@@ -275,43 +219,12 @@ export function deleteTreeItem(
   name: string
 ): { tree: Record<string, any>; ok: boolean; error?: string } {
   const next = clone(tree);
+  const { parent } = getParentNode(next, level, path);
+  if (!parent) return { tree, ok: false, error: 'Path not found' };
 
-  try {
-    if (level === 'vertical') {
-      delete next[name];
-      return { tree: next, ok: true };
-    }
-    if (level === 'org') {
-      if (next[path.vertical]) delete next[path.vertical][name];
-      return { tree: next, ok: true };
-    }
-    if (level === 'batch') {
-      const o = next[path.vertical]?.[path.org];
-      if (o) delete o[name];
-      return { tree: next, ok: true };
-    }
-    if (level === 'term') {
-      const b = next[path.vertical]?.[path.org]?.[path.batch];
-      if (b) delete b[name];
-      return { tree: next, ok: true };
-    }
-    if (level === 'section') {
-      const t = next[path.vertical]?.[path.org]?.[path.batch]?.[path.term];
-      if (t) delete t[name];
-      return { tree: next, ok: true };
-    }
-    if (level === 'subject') {
-      const s =
-        next[path.vertical]?.[path.org]?.[path.batch]?.[path.term]?.[
-          path.section
-        ];
-      if (s) delete s[name];
-      return { tree: next, ok: true };
-    }
-  } catch (e: any) {
-    return { tree, ok: false, error: e?.message || 'Delete failed' };
-  }
-
+  const actual = findKey(parent, name);
+  if (!actual) return { tree, ok: false, error: 'Item not found' };
+  delete parent[actual];
   return { tree: next, ok: true };
 }
 
@@ -329,8 +242,7 @@ export function pathFromCrumbs(
     'subject',
   ];
   for (let i = 0; i <= index && i < crumbs.length; i++) {
-    const key = levels[i];
-    (path as any)[key] = crumbs[i];
+    (path as any)[levels[i]] = crumbs[i];
   }
   const nextLevel = levels[Math.min(index + 1, levels.length - 1)];
   return { path, level: nextLevel };
