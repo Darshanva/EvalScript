@@ -14,34 +14,41 @@ import {
   type TreeLevel,
   type TreePath,
 } from '../../lib/exam-tree';
-import { findVerticalForOrg } from '../../lib/hod-scope';
+import { findVerticalForOrg, resolveOrgKey } from '../../lib/hod-scope';
 
 export default function HodStructurePage() {
   const { state, showToast } = useApp();
   const navigate = useNavigate();
-  const orgName = state.currentUser?.client || state.currentUser?.organisation || '';
+  const orgName = (
+    state.currentUser?.organisation ||
+    state.currentUser?.client ||
+    ''
+  ).trim();
 
   const [tree, setTree] = useState<Record<string, any>>({});
   const [vertical, setVertical] = useState('');
+  const [orgKey, setOrgKey] = useState('');
   const [level, setLevel] = useState<TreeLevel>('batch');
   const [path, setPath] = useState<TreePath>({ ...EMPTY_PATH });
+  const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
   const [newName, setNewName] = useState('');
-  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
 
   const refresh = useCallback(async () => {
     const t = await loadExamTree();
     const v = findVerticalForOrg(t, orgName) || '';
+    const o = resolveOrgKey(t, orgName) || '';
     setTree(t);
     setVertical(v);
+    setOrgKey(o);
     setPath((prev) => ({
       ...EMPTY_PATH,
       vertical: v,
-      org: orgName,
-      batch: prev.org === orgName ? prev.batch : '',
-      term: prev.org === orgName ? prev.term : '',
-      section: prev.org === orgName ? prev.section : '',
-      subject: prev.org === orgName ? prev.subject : '',
+      org: o,
+      batch: prev.vertical === v && prev.org === o ? prev.batch : '',
+      term: prev.vertical === v && prev.org === o ? prev.term : '',
+      section: prev.vertical === v && prev.org === o ? prev.section : '',
     }));
     setLoading(false);
   }, [orgName]);
@@ -60,13 +67,11 @@ export default function HodStructurePage() {
   const workingPath: TreePath = {
     ...path,
     vertical,
-    org: orgName,
+    org: orgKey,
   };
 
   const items =
-    vertical && orgName
-      ? getItemsAtLevel(tree, level, workingPath)
-      : [];
+    vertical && orgKey ? getItemsAtLevel(tree, level, workingPath) : [];
 
   function openItem(name: string) {
     if (level === 'batch') {
@@ -98,56 +103,92 @@ export default function HodStructurePage() {
 
   async function handleAdd() {
     const name = newName.trim();
-    if (!name || !vertical || !orgName) {
-      showToast('Organisation not linked in structure', 'error');
+    if (!name) {
+      showToast('Enter a name', 'error');
       return;
     }
+    if (!vertical || !orgKey) {
+      showToast(
+        'Admin must create your organisation under a Vertical first',
+        'error'
+      );
+      return;
+    }
+
+    const result = addTreeItem(tree, level, workingPath, name);
+    if (!result.ok) {
+      showToast(result.error || 'Add failed', 'error');
+      return;
+    }
+
+    setSaving(true);
     try {
-      const next = addTreeItem(tree, level, workingPath, name);
-      setTree(next);
-      await saveExamTree(next);
+      setTree(result.tree);
+      await saveExamTree(result.tree);
       setNewName('');
       setAdding(false);
-      showToast(`Added “${name}” — visible to Admin & Faculty`, 'success');
+      showToast(`Added “${name}” — Admin & Faculty updated`, 'success');
       await refresh();
     } catch (e: any) {
-      showToast(e.message || 'Add failed', 'error');
+      showToast(e?.message || 'Cloud save failed', 'error');
+    } finally {
+      setSaving(false);
     }
   }
 
   async function handleDelete(name: string) {
-    if (!window.confirm(`Delete “${name}”? This updates Admin/Faculty tree too.`)) {
+    if (!window.confirm(`Delete “${name}”?`)) return;
+    const result = deleteTreeItem(tree, level, workingPath, name);
+    if (!result.ok) {
+      showToast(result.error || 'Delete failed', 'error');
       return;
     }
     try {
-      const next = deleteTreeItem(tree, level, workingPath, name);
-      setTree(next);
-      await saveExamTree(next);
-      showToast('Deleted', 'success');
+      setTree(result.tree);
+      await saveExamTree(result.tree);
+      showToast('Deleted — Admin & Faculty updated', 'success');
       await refresh();
     } catch (e: any) {
-      showToast(e.message || 'Delete failed', 'error');
+      showToast(e?.message || 'Save failed', 'error');
     }
   }
 
   if (!orgName) {
     return (
       <PageContainer>
-        <p className="text-sm text-red-600">
-          HOD profile has no organisation. Re-register or set organisation on profile.
-        </p>
+        <PageHeader title="Structure" breadcrumb="HOD" showBack backTo="/hod" />
+        <Card>
+          <p className="text-sm text-red-600">
+            HOD profile has no organisation. Register again and select Organisation.
+          </p>
+        </Card>
       </PageContainer>
     );
   }
 
-  if (!loading && !vertical) {
+  if (!loading && (!vertical || !orgKey)) {
     return (
       <PageContainer>
-        <PageHeader title="Structure" subtitle={orgName} breadcrumb="HOD" showBack backTo="/hod" />
+        <PageHeader
+          title="Structure"
+          subtitle={orgName}
+          breadcrumb="HOD"
+          showBack
+          backTo="/hod"
+        />
         <Card>
-          <p className="text-sm text-amber-700">
-            Organisation <strong>{orgName}</strong> not found under any Vertical in
-            Admin Exam Structure. Admin must create Vertical → <strong>{orgName}</strong>.
+          <p className="text-sm text-amber-800">
+            Organisation <strong>{orgName}</strong> is not in Admin Exam Structure
+            yet.
+          </p>
+          <p className="text-xs text-slate-600 mt-2">
+            Admin must open <strong>Exam Structure</strong> → create/select a
+            Vertical → add organisation named exactly <strong>{orgName}</strong>{' '}
+            (e.g. HDFC Bank) → then Batches / Terms / Sections.
+          </p>
+          <p className="text-xs text-slate-500 mt-2">
+            After Admin saves, refresh this page. You will only see that org’s
+            folders — no separate tree.
           </p>
         </Card>
       </PageContainer>
@@ -158,7 +199,7 @@ export default function HodStructurePage() {
     <PageContainer>
       <PageHeader
         title="Structure"
-        subtitle={`${orgName} · Batch → Term → Section → Subject`}
+        subtitle={`${orgName} · Admin tree · Batch → Term → Section → Subject`}
         breadcrumb="HOD"
         showBack
         backTo="/hod"
@@ -168,14 +209,15 @@ export default function HodStructurePage() {
         <Button variant="ghost" size="sm" onClick={goBack}>
           ← Back
         </Button>
-        <Badge variant="navy">{LEVEL_TITLES[level] || level}</Badge>
+        <Badge variant="navy">{LEVEL_TITLES[level]}</Badge>
+        <Badge variant="muted">{items.length}</Badge>
         <Button size="sm" variant="secondary" onClick={() => setAdding(true)}>
-          + Add
+          + Add {LEVEL_TITLES[level]}
         </Button>
       </div>
 
       <p className="text-xs text-slate-500 mb-3">
-        {vertical} › {orgName}
+        {vertical} › {orgKey}
         {path.batch ? ` › ${path.batch}` : ''}
         {path.term ? ` › ${path.term}` : ''}
         {path.section ? ` › ${path.section}` : ''}
@@ -184,12 +226,14 @@ export default function HodStructurePage() {
       {adding && (
         <Card className="mb-4 flex flex-wrap gap-2 items-end">
           <Input
-            label={`New ${LEVEL_TITLES[level] || level}`}
+            label={`New ${LEVEL_TITLES[level]}`}
             value={newName}
             onChange={(e) => setNewName(e.target.value)}
-            placeholder="Name"
+            onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
           />
-          <Button onClick={handleAdd}>Add</Button>
+          <Button loading={saving} onClick={handleAdd}>
+            Add
+          </Button>
           <Button variant="ghost" onClick={() => setAdding(false)}>
             Cancel
           </Button>
@@ -201,7 +245,8 @@ export default function HodStructurePage() {
       ) : items.length === 0 ? (
         <Card>
           <p className="text-sm text-slate-400 text-center py-8">
-            Empty. Click + Add to create a {LEVEL_TITLES[level] || level}.
+            No {LEVEL_TITLES[level].toLowerCase()}s yet. Admin may add them, or
+            click + Add here.
           </p>
         </Card>
       ) : (
@@ -209,12 +254,16 @@ export default function HodStructurePage() {
           {items.map((name) => (
             <div
               key={name}
-              className="p-4 border-2 border-slate-200 rounded-xl bg-white hover:border-navy-300"
+              className="p-4 border-2 border-slate-200 rounded-xl bg-white"
             >
               <p className="font-semibold text-slate-900">{name}</p>
               <div className="flex gap-2 mt-3">
                 {level !== 'subject' && (
-                  <Button size="sm" variant="secondary" onClick={() => openItem(name)}>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    onClick={() => openItem(name)}
+                  >
                     Open
                   </Button>
                 )}
