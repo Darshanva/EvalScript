@@ -94,27 +94,45 @@ export default function ExamStructurePage() {
     } else navigate('/admin');
   }
 
-  async function handleAdd() {
-    const name = newName.trim();
-    if (!name) {
-      showToast('Enter a name', 'error');
-      return;
-    }
-    const next = addTreeItem(tree, level, path, name);
-    setTree(next);
-    await saveExamTree(next);
-    setNewName('');
-    setAdding(false);
-    showToast(`Added "${name}"`, 'success');
+async function handleAdd() {
+  const name = newName.trim();
+  if (!name) {
+    showToast('Enter a name', 'error');
+    return;
   }
 
-  async function handleDelete(name: string) {
-    if (!window.confirm(`Delete "${name}" and everything under it?`)) return;
-    const next = deleteTreeItem(tree, level, path, name);
-    setTree(next);
-    await saveExamTree(next);
-    showToast(`Deleted "${name}"`, 'success');
+  const result = addTreeItem(tree, level, path, name);
+  if (!result.ok) {
+    showToast(result.error || 'Could not add', 'error');
+    return;
   }
+
+  try {
+    setTree(result.tree);
+    await saveExamTree(result.tree);
+    setNewName('');
+    setAdding(false);
+    showToast(`Added “${name}” — visible to Faculty`, 'success');
+  } catch (e: any) {
+    showToast(e.message || 'Cloud save failed', 'error');
+  }
+}
+
+async function handleDelete(name: string) {
+  if (!window.confirm(`Delete “${name}”?`)) return;
+  const result = deleteTreeItem(tree, level, path, name);
+  if (!result.ok) {
+    showToast(result.error || 'Delete failed', 'error');
+    return;
+  }
+  try {
+    setTree(result.tree);
+    await saveExamTree(result.tree);
+    showToast('Deleted', 'success');
+  } catch (e: any) {
+    showToast(e.message || 'Cloud save failed', 'error');
+  }
+}
 
   if (loading) {
     return (
