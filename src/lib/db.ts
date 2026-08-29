@@ -5,6 +5,7 @@ import type {
   Submission,
   Evaluation,
   AuditLog,
+  Rubric,
 } from '../types';
 
 function mapProfile(row: any): User {
@@ -29,7 +30,6 @@ function mapProfile(row: any): User {
   };
 }
 
-/** After auth — load or create profile (keeps client/batch/section) */
 export async function ensureProfile(authUser: {
   id: string;
   email?: string | null;
@@ -42,15 +42,9 @@ export async function ensureProfile(authUser: {
       .eq('id', authUser.id)
       .maybeSingle();
 
-    if (error) {
-      console.error('ensureProfile select', error);
-    }
+    if (error) console.error('ensureProfile select', error);
+    if (data) return mapProfile(data);
 
-    if (data) {
-      return mapProfile(data);
-    }
-
-    // First login — create minimal profile from metadata
     const meta = authUser.user_metadata || {};
     const name =
       (meta.name as string) ||
@@ -95,7 +89,6 @@ export async function ensureProfile(authUser: {
         calibrated: false,
       };
     }
-
     return mapProfile(created);
   } catch (e) {
     console.error('ensureProfile', e);
@@ -134,7 +127,6 @@ export async function fetchExams(): Promise<Exam[]> {
   return (data || []).map(mapExam);
 }
 
-/** No demo seed — cloud only */
 export async function ensureExamsSeeded(): Promise<Exam[]> {
   return fetchExams();
 }
@@ -180,7 +172,9 @@ function mapSubmission(row: any): Submission {
     studentId: row.student_id,
     studentName: row.student_name || '',
     pages: Array.isArray(row.pages) ? row.pages : [],
-    pageCount: row.page_count ?? (Array.isArray(row.pages) ? row.pages.length : 0),
+    pageCount:
+      row.page_count ??
+      (Array.isArray(row.pages) ? row.pages.length : 0),
     status: row.status || 'SUBMITTED',
     submittedAt: row.submitted_at || row.created_at,
     createdAt: row.created_at,
@@ -192,16 +186,22 @@ export async function fetchSubmissions(): Promise<Submission[]> {
   const { data, error } = await supabase
     .from('submissions')
     .select('*')
-    .order('created_at', { ascending: false });
+    .order('submitted_at', { ascending: false });
   if (error) {
-    console.error('fetchSubmissions', error);
-    return [];
+    // fallback if submitted_at missing
+    const retry = await supabase.from('submissions').select('*');
+    if (retry.error) {
+      console.error('fetchSubmissions', error);
+      return [];
+    }
+    return (retry.data || []).map(mapSubmission);
   }
   return (data || []).map(mapSubmission);
 }
 
+/** Schema-safe: only columns that commonly exist; no hard dependency on created_at */
 export async function saveSubmission(submission: Submission): Promise<void> {
-  const row = {
+  const row: Record<string, unknown> = {
     id: submission.id,
     exam_id: submission.examId,
     exam_title: submission.examTitle || null,
@@ -212,12 +212,27 @@ export async function saveSubmission(submission: Submission): Promise<void> {
     page_count: submission.pageCount ?? submission.pages?.length ?? 0,
     status: submission.status || 'SUBMITTED',
     submitted_at: submission.submittedAt || new Date().toISOString(),
-    created_at: submission.createdAt || new Date().toISOString(),
   };
-  const { error } = await supabase.from('submissions').upsert(row);
+
+  let { error } = await supabase.from('submissions').upsert(row);
+
+  // Retry without optional fields if schema rejects
   if (error) {
-    console.error('saveSubmission', error);
-    throw error;
+    console.warn('saveSubmission first try', error.message);
+    const minimal = {
+      id: submission.id,
+      exam_id: submission.examId,
+      student_id: submission.studentId,
+      student_name: submission.studentName,
+      pages: submission.pages || [],
+      status: submission.status || 'SUBMITTED',
+    };
+    const retry = await supabase.from('submissions').upsert(minimal);
+    if (retry.error) {
+      console.error('saveSubmission', retry.error);
+      throw retry.error;
+    }
+    return;
   }
 }
 
@@ -267,10 +282,7 @@ function mapEvaluation(row: any): Evaluation {
 }
 
 export async function fetchEvaluations(): Promise<Evaluation[]> {
-  const { data, error } = await supabase
-    .from('evaluations')
-    .select('*')
-    .order('created_at', { ascending: false });
+  const { data, error } = await supabase.from('evaluations').select('*');
   if (error) {
     console.error('fetchEvaluations', error);
     return [];
@@ -302,11 +314,44 @@ export async function saveEvaluation(evaluation: Evaluation): Promise<void> {
     ai_generated_at: evaluation.aiGeneratedAt,
     faculty_reviewed_at: evaluation.facultyReviewedAt,
     published_at: evaluation.publishedAt,
-    created_at: evaluation.createdAt || new Date().toISOString(),
   };
   const { error } = await supabase.from('evaluations').upsert(row);
   if (error) {
     console.error('saveEvaluation', error);
+    throw error;
+  }
+}
+
+function mapRubric(row: any): Rubric {
+  return {
+    id: row.id,
+    examId: row.exam_id,
+    questions: row.questions || [],
+    createdAt: row.created_at || new Date().toISOString(),
+    updatedAt: row.updated_at || new Date().toISOString(),
+  };
+}
+
+export async function fetchRubrics(): Promise<Rubric[]> {
+  const { data, error } = await supabase.from('rubrics').select('*');
+  if (error) {
+    console.error('fetchRubrics', error);
+    return [];
+  }
+  return (data || []).map(mapRubric);
+}
+
+export async function saveRubric(rubric: Rubric): Promise<void> {
+  const row = {
+    id: rubric.id,
+    exam_id: rubric.examId,
+    questions: rubric.questions || [],
+    created_at: rubric.createdAt || new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+  const { error } = await supabase.from('rubrics').upsert(row);
+  if (error) {
+    console.error('saveRubric', error);
     throw error;
   }
 }
@@ -329,7 +374,6 @@ export async function fetchAuditLogs(): Promise<AuditLog[]> {
   const { data, error } = await supabase
     .from('audit_logs')
     .select('*')
-    .order('timestamp', { ascending: false })
     .limit(200);
   if (error) {
     console.error('fetchAuditLogs', error);
@@ -351,7 +395,5 @@ export async function saveAuditLog(log: AuditLog): Promise<void> {
     timestamp: log.timestamp,
   };
   const { error } = await supabase.from('audit_logs').upsert(row);
-  if (error) {
-    console.error('saveAuditLog', error);
-  }
+  if (error) console.error('saveAuditLog', error);
 }

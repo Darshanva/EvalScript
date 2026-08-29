@@ -40,6 +40,8 @@ import {
   deleteExam as deleteExamFromDb,
   fetchAuditLogs,
   saveAuditLog,
+  fetchRubrics,
+  saveRubric,
 } from '../lib/db';
 import { toPath } from '../lib/routes';
 import { navigationRef } from '../lib/navigation';
@@ -192,8 +194,18 @@ function appReducer(state: AppState, action: AppAction): AppState {
         exams: state.exams.filter((e) => e.id !== action.examId),
         rubrics: state.rubrics.filter((r) => r.examId !== action.examId),
       };
-    case 'ADD_RUBRIC':
+    case 'ADD_RUBRIC': {
+      const exists = state.rubrics.some((r) => r.id === action.rubric.id);
+      if (exists) {
+        return {
+          ...state,
+          rubrics: state.rubrics.map((r) =>
+            r.id === action.rubric.id ? action.rubric : r
+          ),
+        };
+      }
       return { ...state, rubrics: [...state.rubrics, action.rubric] };
+    }
     case 'UPDATE_RUBRIC':
       return {
         ...state,
@@ -327,11 +339,12 @@ function facultyExamIds(exams: Exam[], user: User): Set<string> {
 }
 
 async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
-  const [subs, evals, exams, logs] = await Promise.all([
+  const [subs, evals, exams, logs, rubrics] = await Promise.all([
     fetchSubmissions(),
     fetchEvaluations(),
     ensureExamsSeeded(),
     fetchAuditLogs(),
+    fetchRubrics(),
   ]);
 
   let users: User[] = [];
@@ -350,6 +363,7 @@ async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
       exams,
       users,
       auditLogs: logs,
+      rubrics,
     },
   });
 }
@@ -468,7 +482,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       }
       const exam = state.exams.find((e) => e.id === submission.examId);
       if (!exam) {
-        console.warn('processEvaluation: exam not found', submission.examId);
         dispatch({
           type: 'SHOW_TOAST',
           message: 'Exam not found for this submission',
@@ -482,7 +495,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
         state.rubrics.find((r) => r.id === exam.rubricId);
 
       if (!rubric) {
-        // Minimal rubric so pipeline continues
         rubric = {
           id: exam.rubricId || `rubric-auto-${exam.id}`,
           examId: exam.id,
@@ -505,6 +517,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           updatedAt: new Date().toISOString(),
         };
         dispatch({ type: 'ADD_RUBRIC', rubric });
+        saveRubric(rubric).catch(console.error);
       }
 
       dispatch({
@@ -545,7 +558,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
             });
           }
 
-          // Ensure faculty can find it
           evaluation = {
             ...evaluation,
             examId: submission.examId,
@@ -718,10 +730,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const createRubric = useCallback((rubric: Rubric) => {
     dispatch({ type: 'ADD_RUBRIC', rubric });
+    saveRubric(rubric).catch((e) => console.error('saveRubric', e));
   }, []);
 
   const updateRubric = useCallback((rubric: Rubric) => {
     dispatch({ type: 'UPDATE_RUBRIC', rubric });
+    saveRubric(rubric).catch((e) => console.error('saveRubric', e));
   }, []);
 
   const addCalibration = useCallback((calibration: CalibrationSample) => {
@@ -758,13 +772,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
       );
     }
 
-    // student — section / batch match
     if (u.role === 'student') {
       const section = (u.section || '').toLowerCase().trim();
       const batch = (u.batch || '').toLowerCase().trim();
       const term = (u.term || '').toLowerCase().trim();
-      const client = (u.client || '').toLowerCase().trim();
-      const org = (u.organisation || '').toLowerCase().trim();
+      const org = (u.organisation || u.client || '').toLowerCase().trim();
 
       return state.exams.filter((exam) => {
         const status = (exam.status || 'ACTIVE').toUpperCase();
@@ -777,17 +789,19 @@ export function AppProvider({ children }: { children: ReactNode }) {
         const hay =
           `${exam.description || ''} ${exam.title || ''} ${exam.code || ''}`.toLowerCase();
 
-        if (section) {
-          return (
-            hay.includes(section) ||
-            hay.includes(`section ${section}`) ||
-            hay.includes(`section${section}`)
-          );
+        if (section && hay.includes(`[section:${section}]`)) return true;
+        if (batch && hay.includes(`[batch:${batch}]`) && section && hay.includes(section))
+          return true;
+        if (section && (hay.includes(section) || hay.includes(`section ${section}`))) {
+          if (batch && hay.includes('batch') && !hay.includes(batch)) {
+            return hay.includes(section);
+          }
+          return true;
         }
-
-        const parts = [client, org, batch, term].filter(Boolean);
-        if (!parts.length) return true;
-        return parts.every((p) => hay.includes(p));
+        if (!section && batch && hay.includes(batch)) return true;
+        if (!section && !batch && org && hay.includes(org)) return true;
+        if (!section && !batch && !org) return true;
+        return false;
       });
     }
 

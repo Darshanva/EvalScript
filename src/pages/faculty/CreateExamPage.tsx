@@ -18,6 +18,7 @@ import {
   EMPTY_PATH,
   LEVEL_TITLES,
   pathFromCrumbs,
+  formatHierarchyPath,
   type TreeLevel,
   type TreePath,
 } from '../../lib/exam-tree';
@@ -267,19 +268,32 @@ export default function CreateExamPage() {
     try {
       const examId = genId('exam');
       const rubricId = genId('rubric');
-      const hierarchyPath = breadcrumbParts.join(' > ');
-      // Explicit section for analytics (SEC A / B / …)
+
+      const hierarchyPath =
+        typeof formatHierarchyPath === 'function'
+          ? formatHierarchyPath(path)
+          : breadcrumbParts.join(' › ');
+
+      // Machine-readable tags for student matching (AppContext)
+      const tags = [
+        path.vertical && `[vertical:${path.vertical}]`,
+        path.org && `[org:${path.org}]`,
+        path.batch && `[batch:${path.batch}]`,
+        path.term && `[term:${path.term}]`,
+        path.section && `[section:${path.section}]`,
+        path.subject && `[subject:${path.subject}]`,
+      ].filter(Boolean);
+
       const sectionLabel = path.section
-        ? path.section.match(/^[A-Fa-f]$/)
+        ? path.section.match(/^[A-Za-z]$/)
           ? `Section ${path.section.toUpperCase()}`
-          : path.section.startsWith('Section')
-            ? path.section
-            : `Section ${path.section}`
+          : path.section
         : '';
 
       const extraNotes = [
         description.trim(),
         hierarchyPath ? `Path: ${hierarchyPath}` : '',
+        ...tags,
         sectionLabel,
         path.batch ? `Batch: ${path.batch}` : '',
         path.term ? `Term: ${path.term}` : '',
@@ -301,7 +315,6 @@ export default function CreateExamPage() {
         maxMarks:
           rubricMode === 'write' ? totalRubricMarks : totalRubricMarks || 100,
         status: 'ACTIVE',
-        // Batch/section exam — not per-student enrolment
         studentIds: [],
         rubricId,
         description: extraNotes,
@@ -399,7 +412,7 @@ export default function CreateExamPage() {
         ) : items.length === 0 ? (
           <Card>
             <p className="text-sm text-slate-500 text-center py-10">
-              Nothing here. Ask Admin to add items under{' '}
+              Nothing here. Ask Admin / HOD to add items under{' '}
               <strong>Exam Structure</strong>.
             </p>
           </Card>
@@ -527,7 +540,7 @@ export default function CreateExamPage() {
               {path.section ? (
                 <>
                   {' '}
-                  · Section tag for analytics:{' '}
+                  · Section:{' '}
                   <strong>{path.section}</strong>
                 </>
               ) : null}
@@ -584,9 +597,7 @@ export default function CreateExamPage() {
 
           <Card>
             <h3 className="font-semibold text-slate-900 mb-1">Rubrics</h3>
-            <p className="text-xs text-slate-500 mb-4">
-              Write or upload
-            </p>
+            <p className="text-xs text-slate-500 mb-4">Write or upload</p>
             <div className="flex gap-2 mb-5">
               <button
                 type="button"
@@ -753,7 +764,7 @@ export default function CreateExamPage() {
             {breadcrumbParts.join(' › ')}
           </p>
           <p className="text-xs text-slate-400 mb-4">
-            Batch/section exam — students submit under this structure
+            Tags saved for student section matching
           </p>
           <Button
             className="w-full"

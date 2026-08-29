@@ -111,7 +111,7 @@ export default function LandingPage() {
           <div className="max-w-3xl">
             <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-white/10 border border-white/20 text-xs font-medium text-white/80 mb-8">
               <span className="w-1.5 h-1.5 rounded-full bg-gold-400 animate-pulse" />
-              Powered by Groq Vision AI
+              Powered by Claude Vision AI
             </div>
             <h1
               className="font-display text-5xl lg:text-6xl font-normal leading-tight mb-6"

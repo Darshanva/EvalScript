@@ -1,45 +1,5 @@
 import { supabase } from './supabase';
 
-const STORAGE_KEY = 'evalscript_exam_tree';
-const CLOUD_ID = 'default';
-
-export const DEFAULT_EXAM_TREE: Record<string, any> = {
-  'Select Vertical / Client': {
-    'HDFC long term': {
-      'Batch 1': {
-        'Term 1': { 'Section A': ['Subject 1'], 'Section B': ['Subject 1'] },
-        'Term 2': {
-          'Section A': ['Subject Name'],
-          'Section B': ['Subject Name'],
-          'Section C': ['Subject Name'],
-        },
-        'Term 3': { 'Section A': ['Subject 1'] },
-      },
-      'Batch 2': {
-        'Term 1': { 'Section A': ['Subject 1'] },
-        'Term 2': {
-          'Section A': ['Subject Name'],
-          'Section B': ['Subject Name'],
-          'Section C': ['Subject Name'],
-        },
-        'Term 3': { 'Section A': ['Subject 1'] },
-      },
-      'Batch 3': {
-        'Term 1': { 'Section A': ['Subject 1'] },
-      },
-    },
-    'ICICI MT': {
-      'Batch 1': { 'Term 1': { 'Section A': ['Subject 1'] } },
-    },
-    'Federal Bank': {
-      'Batch 1': { 'Term 1': { 'Section A': ['Subject 1'] } },
-    },
-    Kotak: {
-      'Batch 1': { 'Term 1': { 'Section A': ['Subject 1'] } },
-    },
-  },
-};
-
 export type TreeLevel =
   | 'vertical'
   | 'org'
@@ -75,51 +35,81 @@ export const LEVEL_TITLES: Record<TreeLevel, string> = {
   subject: 'Subject',
 };
 
-export function loadExamTreeLocal(): Record<string, any> {
+const STORAGE_KEY = 'evalscript_exam_tree';
+const SETTINGS_KEY = 'exam_tree';
+
+export const DEFAULT_EXAM_TREE: Record<string, any> = {
+  'Select Vertical / Client': {
+    'HDFC Bank': {
+      Batch1: {
+        'Term 1': {
+          'Section A': {},
+          'Section B': {},
+        },
+      },
+    },
+  },
+};
+
+function clone<T>(v: T): T {
+  return JSON.parse(JSON.stringify(v));
+}
+
+function notify() {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return JSON.parse(raw);
+    window.dispatchEvent(new Event('exam-tree-updated'));
   } catch {
     /* ignore */
   }
-  return structuredClone(DEFAULT_EXAM_TREE);
 }
 
-export function saveExamTreeLocal(tree: Record<string, any>) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(tree));
-  // notify other tabs / faculty page
-  window.dispatchEvent(new Event('exam-tree-updated'));
-}
-
-/** Cloud + local. Admin save → faculty same browser + cloud. */
 export async function loadExamTree(): Promise<Record<string, any>> {
+  // 1) Supabase shared
   try {
     const { data, error } = await supabase
-      .from('exam_structure')
-      .select('tree')
-      .eq('id', CLOUD_ID)
+      .from('app_settings')
+      .select('value')
+      .eq('key', SETTINGS_KEY)
       .maybeSingle();
-
-    if (!error && data?.tree) {
-      saveExamTreeLocal(data.tree);
-      return data.tree;
+    if (!error && data?.value && typeof data.value === 'object') {
+      const tree = data.value as Record<string, any>;
+      if (Object.keys(tree).length > 0) {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(tree));
+        return tree;
+      }
     }
   } catch (e) {
-    console.warn('exam_structure cloud load failed', e);
+    console.warn('loadExamTree cloud', e);
   }
-  return loadExamTreeLocal();
+
+  // 2) Local cache
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && Object.keys(parsed).length) {
+        return parsed;
+      }
+    }
+  } catch {
+    /* ignore */
+  }
+
+  return clone(DEFAULT_EXAM_TREE);
 }
 
-export async function saveExamTree(tree: Record<string, any>) {
-  saveExamTreeLocal(tree);
+export async function saveExamTree(tree: Record<string, any>): Promise<void> {
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(tree));
+  notify();
   try {
-    await supabase.from('exam_structure').upsert({
-      id: CLOUD_ID,
-      tree,
+    const { error } = await supabase.from('app_settings').upsert({
+      key: SETTINGS_KEY,
+      value: tree,
       updated_at: new Date().toISOString(),
     });
+    if (error) console.error('saveExamTree cloud', error);
   } catch (e) {
-    console.warn('exam_structure cloud save failed', e);
+    console.warn('saveExamTree cloud failed', e);
   }
 }
 
@@ -128,28 +118,26 @@ export function getItemsAtLevel(
   level: TreeLevel,
   path: TreePath
 ): string[] {
-  try {
-    if (level === 'vertical') return Object.keys(tree);
-    if (level === 'org') return Object.keys(tree[path.vertical] || {});
-    if (level === 'batch')
-      return Object.keys(tree[path.vertical]?.[path.org] || {});
-    if (level === 'term')
-      return Object.keys(tree[path.vertical]?.[path.org]?.[path.batch] || {});
-    if (level === 'section')
-      return Object.keys(
-        tree[path.vertical]?.[path.org]?.[path.batch]?.[path.term] || {}
-      );
-    if (level === 'subject') {
-      const node =
-        tree[path.vertical]?.[path.org]?.[path.batch]?.[path.term]?.[
-          path.section
-        ];
-      return Array.isArray(node) ? node : Object.keys(node || {});
-    }
-  } catch {
-    return [];
+  if (!tree) return [];
+  if (level === 'vertical') return Object.keys(tree);
+
+  let node: any = tree;
+  if (level === 'org') {
+    node = tree[path.vertical];
+  } else if (level === 'batch') {
+    node = tree[path.vertical]?.[path.org];
+  } else if (level === 'term') {
+    node = tree[path.vertical]?.[path.org]?.[path.batch];
+  } else if (level === 'section') {
+    node = tree[path.vertical]?.[path.org]?.[path.batch]?.[path.term];
+  } else if (level === 'subject') {
+    node =
+      tree[path.vertical]?.[path.org]?.[path.batch]?.[path.term]?.[
+        path.section
+      ];
   }
-  return [];
+  if (!node || typeof node !== 'object' || Array.isArray(node)) return [];
+  return Object.keys(node);
 }
 
 export function addTreeItem(
@@ -158,26 +146,45 @@ export function addTreeItem(
   path: TreePath,
   name: string
 ): Record<string, any> {
-  const next = structuredClone(tree);
+  const next = clone(tree);
+  const n = name.trim();
+  if (!n) return next;
+
   if (level === 'vertical') {
-    if (!next[name]) next[name] = {};
-  } else if (level === 'org') {
-    if (!next[path.vertical][name]) next[path.vertical][name] = {};
-  } else if (level === 'batch') {
-    if (!next[path.vertical][path.org][name])
-      next[path.vertical][path.org][name] = {};
-  } else if (level === 'term') {
-    if (!next[path.vertical][path.org][path.batch][name])
-      next[path.vertical][path.org][path.batch][name] = {};
-  } else if (level === 'section') {
-    if (!next[path.vertical][path.org][path.batch][path.term][name])
-      next[path.vertical][path.org][path.batch][path.term][name] = [
-        'Subject 1',
+    if (!next[n]) next[n] = {};
+    return next;
+  }
+  if (level === 'org') {
+    if (!next[path.vertical]) next[path.vertical] = {};
+    if (!next[path.vertical][n]) next[path.vertical][n] = {};
+    return next;
+  }
+  if (level === 'batch') {
+    const org = next[path.vertical]?.[path.org];
+    if (!org) return next;
+    if (!org[n]) org[n] = {};
+    return next;
+  }
+  if (level === 'term') {
+    const batch = next[path.vertical]?.[path.org]?.[path.batch];
+    if (!batch) return next;
+    if (!batch[n]) batch[n] = {};
+    return next;
+  }
+  if (level === 'section') {
+    const term = next[path.vertical]?.[path.org]?.[path.batch]?.[path.term];
+    if (!term) return next;
+    if (!term[n]) term[n] = {};
+    return next;
+  }
+  if (level === 'subject') {
+    const sec =
+      next[path.vertical]?.[path.org]?.[path.batch]?.[path.term]?.[
+        path.section
       ];
-  } else if (level === 'subject') {
-    const arr =
-      next[path.vertical][path.org][path.batch][path.term][path.section];
-    if (Array.isArray(arr) && !arr.includes(name)) arr.push(name);
+    if (!sec) return next;
+    if (!sec[n]) sec[n] = {};
+    return next;
   }
   return next;
 }
@@ -188,46 +195,72 @@ export function deleteTreeItem(
   path: TreePath,
   name: string
 ): Record<string, any> {
-  const next = structuredClone(tree);
-  if (level === 'vertical') delete next[name];
-  else if (level === 'org') delete next[path.vertical][name];
-  else if (level === 'batch') delete next[path.vertical][path.org][name];
-  else if (level === 'term')
-    delete next[path.vertical][path.org][path.batch][name];
-  else if (level === 'section')
-    delete next[path.vertical][path.org][path.batch][path.term][name];
-  else if (level === 'subject') {
-    const arr =
-      next[path.vertical][path.org][path.batch][path.term][path.section];
-    if (Array.isArray(arr)) {
-      next[path.vertical][path.org][path.batch][path.term][path.section] =
-        arr.filter((x: string) => x !== name);
-    }
+  const next = clone(tree);
+  if (level === 'vertical') {
+    delete next[name];
+    return next;
+  }
+  if (level === 'org') {
+    delete next[path.vertical]?.[name];
+    return next;
+  }
+  if (level === 'batch') {
+    delete next[path.vertical]?.[path.org]?.[name];
+    return next;
+  }
+  if (level === 'term') {
+    delete next[path.vertical]?.[path.org]?.[path.batch]?.[name];
+    return next;
+  }
+  if (level === 'section') {
+    delete next[path.vertical]?.[path.org]?.[path.batch]?.[path.term]?.[name];
+    return next;
+  }
+  if (level === 'subject') {
+    delete next[path.vertical]?.[path.org]?.[path.batch]?.[path.term]?.[
+      path.section
+    ]?.[name];
+    return next;
   }
   return next;
 }
 
-/** Jump breadcrumb to index (0 = vertical root item level after pick) */
 export function pathFromCrumbs(
-  parts: string[],
-  upto: number
+  crumbs: string[],
+  index: number
 ): { path: TreePath; level: TreeLevel } {
-  const p: TreePath = { ...EMPTY_PATH };
-  if (upto >= 0 && parts[0]) p.vertical = parts[0];
-  if (upto >= 1 && parts[1]) p.org = parts[1];
-  if (upto >= 2 && parts[2]) p.batch = parts[2];
-  if (upto >= 3 && parts[3]) p.term = parts[3];
-  if (upto >= 4 && parts[4]) p.section = parts[4];
-  if (upto >= 5 && parts[5]) p.subject = parts[5];
+  const path = { ...EMPTY_PATH };
+  const levels: TreeLevel[] = [
+    'vertical',
+    'org',
+    'batch',
+    'term',
+    'section',
+    'subject',
+  ];
+  for (let i = 0; i <= index && i < crumbs.length; i++) {
+    const key = levels[i];
+    if (key === 'vertical') path.vertical = crumbs[i];
+    if (key === 'org') path.org = crumbs[i];
+    if (key === 'batch') path.batch = crumbs[i];
+    if (key === 'term') path.term = crumbs[i];
+    if (key === 'section') path.section = crumbs[i];
+    if (key === 'subject') path.subject = crumbs[i];
+  }
+  const nextLevel = levels[Math.min(index + 1, levels.length - 1)];
+  return { path, level: nextLevel };
+}
 
-  let level: TreeLevel = 'vertical';
-  if (upto < 0) level = 'vertical';
-  else if (upto === 0) level = 'org';
-  else if (upto === 1) level = 'batch';
-  else if (upto === 2) level = 'term';
-  else if (upto === 3) level = 'section';
-  else if (upto === 4) level = 'subject';
-  else level = 'subject';
-
-  return { path: p, level };
+/** Canonical path string for exams / publish / student match */
+export function formatHierarchyPath(path: Partial<TreePath>): string {
+  return [
+    path.vertical,
+    path.org,
+    path.batch,
+    path.term,
+    path.section,
+    path.subject,
+  ]
+    .filter(Boolean)
+    .join(' › ');
 }
