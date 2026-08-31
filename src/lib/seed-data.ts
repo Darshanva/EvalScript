@@ -875,8 +875,9 @@ export const DEFAULT_SYSTEM_SETTINGS: SystemSettings = {
   mediumConfidenceThreshold: 0.75,
   aiMode: 'claude',
   aiProvider: 'claude',
-  groqModel: 'llama-3.2-11b-vision-preview',
-  claudeModel: 'claude-sonnet-4-20250514',
+  claudeModel: 'claude-sonnet-4-6',
+  claudeApiKey: '',
+  claudeWorkspaceId: 'claude-sonnet-4-6',
 };
 
 export const CALIBRATION_PASSAGE = `Please write the following passage in your normal handwriting:

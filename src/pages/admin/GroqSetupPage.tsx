@@ -2,23 +2,34 @@ import React, { useState } from 'react';
 import { useApp } from '../../context/AppContext';
 import { Button, Card, Input, Select, Badge } from '../../components/ui';
 import { PageContainer, PageHeader } from '../../components/Layout';
-import { isClaudeConfigured, getClaudeModel } from '../../lib/claude-client';
+import {
+  isClaudeConfigured,
+  getClaudeModel,
+  DEFAULT_CLAUDE_MODEL,
+} from '../../lib/claude-client';
 import Anthropic from '@anthropic-ai/sdk';
 
 const MODELS = [
-  { value: 'claude-sonnet-4-20250514', label: 'Claude Sonnet 4' },
-  { value: 'claude-3-5-sonnet-20241022', label: 'Claude 3.5 Sonnet' },
-  { value: 'claude-3-5-haiku-20241022', label: 'Claude 3.5 Haiku (faster)' },
+  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6' },
+  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5' },
+  { value: 'claude-sonnet-4-5-20250929', label: 'Claude Sonnet 4.5' },
+  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (faster)' },
 ];
+
+function sanitizeModel(m: string | undefined): string {
+  if (!m || m.includes('20250514') || m === 'claude-sonnet-4-20250514') {
+    return DEFAULT_CLAUDE_MODEL;
+  }
+  return m;
+}
 
 export default function GroqSetupPage() {
   const { state, updateSystemSettings, showToast } = useApp();
   const s = state.systemSettings;
 
   const [apiKey, setApiKey] = useState(s.claudeApiKey || '');
-  const [model, setModel] = useState(
-    s.claudeModel || 'claude-sonnet-4-20250514'
-  );
+  const [workspaceId, setWorkspaceId] = useState(s.claudeWorkspaceId || '');
+  const [model, setModel] = useState(sanitizeModel(s.claudeModel));
   const [aiMode, setAiMode] = useState(s.aiMode || 'claude');
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -27,13 +38,16 @@ export default function GroqSetupPage() {
 
   function handleSave() {
     setSaving(true);
+    const cleanModel = sanitizeModel(model);
     updateSystemSettings({
       ...s,
       claudeApiKey: apiKey.trim(),
-      claudeModel: model,
+      claudeWorkspaceId: workspaceId.trim() || undefined,
+      claudeModel: cleanModel,
       aiMode: aiMode as any,
       aiProvider: aiMode === 'demo' ? 'demo' : 'claude',
     });
+    setModel(cleanModel);
     showToast('Claude settings saved', 'success');
     setSaving(false);
   }
@@ -44,23 +58,33 @@ export default function GroqSetupPage() {
       showToast('Paste API key first', 'error');
       return;
     }
+    const useModel = sanitizeModel(model);
     setTesting(true);
     try {
-      const client = new Anthropic({
+      const opts: any = {
         apiKey: key,
         dangerouslyAllowBrowser: true,
-      });
+      };
+      if (workspaceId.trim()) {
+        opts.defaultHeaders = {
+          'anthropic-workspace-id': workspaceId.trim(),
+        };
+      }
+      const client = new Anthropic(opts);
       const msg = await client.messages.create({
-        model: model || getClaudeModel(),
+        model: useModel,
         max_tokens: 32,
         messages: [{ role: 'user', content: 'Reply with OK only.' }],
       });
-      const text =
-        msg.content[0].type === 'text' ? msg.content[0].text : '';
-      showToast(`Claude OK: ${text.slice(0, 40)}`, 'success');
+      const text = msg.content[0].type === 'text' ? msg.content[0].text : '';
+      showToast(`Claude OK (${useModel}): ${text.slice(0, 40)}`, 'success');
     } catch (e: any) {
       console.error(e);
-      showToast(e?.message || 'Claude test failed', 'error');
+      const msg =
+        e?.error?.message ||
+        e?.message ||
+        (typeof e === 'string' ? e : 'Claude test failed');
+      showToast(String(msg).slice(0, 180), 'error');
     } finally {
       setTesting(false);
     }
@@ -76,12 +100,13 @@ export default function GroqSetupPage() {
         backTo="/admin"
       />
 
-      <div className="flex items-center gap-2 mb-6">
+      <div className="flex items-center gap-2 mb-6 flex-wrap">
         <Badge variant={configured ? 'navy' : 'muted'}>
           {configured ? 'Key present' : 'Key missing'}
         </Badge>
         <span className="text-xs text-slate-500">
-          Priority: saved key → VITE_ANTHROPIC_API_KEY
+          Use model like <code>claude-sonnet-4-6</code> — old{' '}
+          <code>*20250514</code> retired
         </span>
       </div>
 
@@ -94,12 +119,21 @@ export default function GroqSetupPage() {
           placeholder="sk-ant-api03-..."
           autoComplete="off"
         />
+
+        <Input
+          label="Workspace ID (only if API requires it)"
+          value={workspaceId}
+          onChange={(e) => setWorkspaceId(e.target.value)}
+          placeholder="wrkspc_... (optional)"
+        />
+
         <Select
           label="Model"
           options={MODELS}
           value={model}
           onChange={(e) => setModel(e.target.value)}
         />
+
         <Select
           label="AI mode"
           options={[
@@ -111,7 +145,7 @@ export default function GroqSetupPage() {
         />
 
         <p className="text-xs text-slate-500">
-          Get a key from{' '}
+          Key from{' '}
           <a
             href="https://console.anthropic.com/"
             target="_blank"
@@ -120,19 +154,14 @@ export default function GroqSetupPage() {
           >
             console.anthropic.com
           </a>
-          . Browser calls use <code>dangerouslyAllowBrowser</code> — for
-          production prefer a backend proxy.
+          . Prefer workspace-scoped key.
         </p>
 
         <div className="flex gap-3">
           <Button loading={saving} onClick={handleSave}>
             Save
           </Button>
-          <Button
-            variant="secondary"
-            loading={testing}
-            onClick={handleTest}
-          >
+          <Button variant="secondary" loading={testing} onClick={handleTest}>
             Test connection
           </Button>
         </div>
