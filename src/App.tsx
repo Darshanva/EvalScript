@@ -32,7 +32,7 @@ import UsersPage from './pages/admin/UsersPage';
 import UsagePage from './pages/admin/UsagePage';
 import AuditLogsPage from './pages/admin/AuditLogsPage';
 import SettingsPage from './pages/admin/SettingsPage';
-import GroqSetupPage from './pages/admin/GroqSetupPage';
+import ClaudeSetupPage from './pages/admin/ClaudeSetupPage';
 import ExamStructurePage from './pages/admin/ExamStructurePage';
 import PublishRightsPage from './pages/admin/PublishRightsPage';
 
@@ -383,11 +383,11 @@ function AppRoutes() {
           }
         />
         <Route
-          path="/admin/groq"
+          path="/admin/Claude"
           element={
             <ProtectedRoute roles={['admin']}>
               <AppLayout>
-                <GroqSetupPage />
+                <ClaudeSetupPage />
               </AppLayout>
             </ProtectedRoute>
           }
