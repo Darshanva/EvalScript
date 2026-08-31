@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { createClaudeClient, getClaudeModel } from './claude-client';
 
 export interface CalibrationAIResult {
   qualityScore: number;
@@ -6,28 +6,7 @@ export interface CalibrationAIResult {
   feedback: string;
   strengths: string[];
   improvements: string[];
-  paceNotes: {
-    slow: string;
-    medium: string;
-    fast: string;
-  };
-}
-
-function getApiKey(): string {
-  try {
-    const raw = localStorage.getItem('evalscript_system_settings');
-    if (raw) {
-      const s = JSON.parse(raw);
-      if (s.claudeApiKey) return s.claudeApiKey;
-    }
-  } catch {
-    /* ignore */
-  }
-  return (
-    (import.meta as any).env?.VITE_ANTHROPIC_API_KEY ||
-    (import.meta as any).env?.VITE_CLAUDE_API_KEY ||
-    ''
-  );
+  paceNotes: { slow: string; medium: string; fast: string };
 }
 
 async function urlToBase64(
@@ -47,62 +26,38 @@ export async function runCalibrationAnalysis(input: {
   imageUrl: string;
   studentName: string;
 }): Promise<CalibrationAIResult> {
-  const apiKey = getApiKey();
+  const client = createClaudeClient();
 
-  if (!apiKey) {
+  if (!client) {
     return {
       qualityScore: 70,
-      transcription:
-        'API key not configured. Image saved; analysis skipped.',
+      transcription: 'API key not configured.',
       feedback:
         'Add Claude API key in Admin → Claude Setup for full handwriting feedback.',
-      strengths: ['Sample uploaded successfully'],
-      improvements: ['Configure Claude to unlock detailed feedback'],
-      paceNotes: {
-        slow: 'Not analysed',
-        medium: 'Not analysed',
-        fast: 'Not analysed',
-      },
+      strengths: ['Sample uploaded'],
+      improvements: ['Configure Claude API key'],
+      paceNotes: { slow: '—', medium: '—', fast: '—' },
     };
   }
 
-  const client = new Anthropic({
-    apiKey,
-    dangerouslyAllowBrowser: true,
-  });
-
   const img = await urlToBase64(input.imageUrl);
 
-  const prompt = `You are a handwriting analysis expert for an exam evaluation system.
+  const prompt = `Handwriting analysis for exam AI.
 Student: ${input.studentName}
+One page with SLOW / MEDIUM / FAST sections of the same calibration passage.
 
-They uploaded ONE page. On that page they were asked to write the same calibration passage THREE times under clear headings:
-1) SLOW — careful neat writing
-2) MEDIUM — normal exam pace
-3) FAST — hurried writing
-
-Tasks:
-- Transcribe what you can read (note unclear parts)
-- Score overall handwriting quality for AI OCR readiness from 0–100
-- List strengths and concrete improvements
-- Comment separately on slow / medium / fast sections if visible
-
-Respond ONLY valid JSON:
+Return ONLY JSON:
 {
-  "qualityScore": number,
-  "transcription": "combined notes",
-  "feedback": "paragraph for the student",
+  "qualityScore": 0-100,
+  "transcription": "...",
+  "feedback": "paragraph",
   "strengths": ["..."],
   "improvements": ["..."],
-  "paceNotes": {
-    "slow": "...",
-    "medium": "...",
-    "fast": "..."
-  }
+  "paceNotes": { "slow": "...", "medium": "...", "fast": "..." }
 }`;
 
   const msg = await client.messages.create({
-    model: 'claude-sonnet-4-20250514',
+    model: getClaudeModel(),
     max_tokens: 2000,
     messages: [
       {
