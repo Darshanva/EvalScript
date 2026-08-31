@@ -1,4 +1,5 @@
 import { supabase } from './supabase';
+import type { CalibrationSample } from '../types';
 import type {
   User,
   Exam,
@@ -396,4 +397,54 @@ export async function saveAuditLog(log: AuditLog): Promise<void> {
   };
   const { error } = await supabase.from('audit_logs').upsert(row);
   if (error) console.error('saveAuditLog', error);
+}
+
+function mapCalibration(row: any): CalibrationSample {
+  return {
+    id: row.id,
+    studentId: row.student_id,
+    imageUrl: row.image_url || undefined,
+    imageUrls: row.image_urls || undefined,
+    qualityScore:
+      row.quality_score != null ? Number(row.quality_score) : undefined,
+    feedback: row.feedback || undefined,
+    transcription: row.transcription || undefined,
+    strengths: Array.isArray(row.strengths) ? row.strengths : [],
+    improvements: Array.isArray(row.improvements) ? row.improvements : [],
+    createdAt: row.created_at || new Date().toISOString(),
+  };
+}
+
+export async function fetchCalibrations(): Promise<CalibrationSample[]> {
+  const { data, error } = await supabase
+    .from('calibrations')
+    .select('*')
+    .order('created_at', { ascending: false });
+  if (error) {
+    console.error('fetchCalibrations', error);
+    return [];
+  }
+  return (data || []).map(mapCalibration);
+}
+
+export async function saveCalibration(
+  sample: CalibrationSample
+): Promise<void> {
+  const row = {
+    id: sample.id,
+    student_id: sample.studentId,
+    image_url: sample.imageUrl || sample.imageUrls?.slow || null,
+    image_urls: sample.imageUrls || null,
+    quality_score: sample.qualityScore ?? null,
+    feedback: sample.feedback || null,
+    transcription: sample.transcription || null,
+    strengths: sample.strengths || [],
+    improvements: sample.improvements || [],
+    created_at: sample.createdAt || new Date().toISOString(),
+  };
+  const { error } = await supabase.from('calibrations').upsert(row);
+  if (error) {
+    console.error('saveCalibration', error);
+    throw error;
+  }
 }

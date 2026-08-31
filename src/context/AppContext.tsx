@@ -42,6 +42,8 @@ import {
   saveAuditLog,
   fetchRubrics,
   saveRubric,
+  fetchCalibrations,
+  saveCalibration,
 } from '../lib/db';
 import { toPath } from '../lib/routes';
 import { navigationRef } from '../lib/navigation';
@@ -213,8 +215,16 @@ function appReducer(state: AppState, action: AppAction): AppState {
           r.id === action.rubric.id ? action.rubric : r
         ),
       };
-    case 'ADD_CALIBRATION':
-      return { ...state, calibrations: [...state.calibrations, action.calibration] };
+    case 'ADD_CALIBRATION': {
+      // One calibration per student — replace on re-calibrate
+      const others = state.calibrations.filter(
+        (c) => c.studentId !== action.calibration.studentId
+      );
+      return {
+        ...state,
+        calibrations: [action.calibration, ...others],
+      };
+    }
     case 'UPDATE_CALIBRATION':
       return {
         ...state,
@@ -229,6 +239,9 @@ function appReducer(state: AppState, action: AppAction): AppState {
           state.currentUser?.id === action.userId
             ? { ...state.currentUser, calibrated: true }
             : state.currentUser,
+        users: state.users.map((u) =>
+          u.id === action.userId ? { ...u, calibrated: true } : u
+        ),
       };
     case 'ADD_USER':
       return { ...state, users: [...state.users, action.user] };
@@ -339,12 +352,13 @@ function facultyExamIds(exams: Exam[], user: User): Set<string> {
 }
 
 async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
-  const [subs, evals, exams, logs, rubrics] = await Promise.all([
+  const [subs, evals, exams, logs, rubrics, calibrations] = await Promise.all([
     fetchSubmissions(),
     fetchEvaluations(),
     ensureExamsSeeded(),
     fetchAuditLogs(),
     fetchRubrics(),
+    fetchCalibrations(),
   ]);
 
   let users: User[] = [];
@@ -364,6 +378,7 @@ async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
       users,
       auditLogs: logs,
       rubrics,
+      calibrations,
     },
   });
 }
@@ -741,6 +756,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const addCalibration = useCallback((calibration: CalibrationSample) => {
     dispatch({ type: 'ADD_CALIBRATION', calibration });
     dispatch({ type: 'UPDATE_USER_CALIBRATED', userId: calibration.studentId });
+    saveCalibration(calibration).catch((e) =>
+      console.error('saveCalibration', e)
+    );
   }, []);
 
   const updateSystemSettings = useCallback((settings: SystemSettings) => {
@@ -775,7 +793,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     if (u.role === 'student') {
       const section = (u.section || '').toLowerCase().trim();
       const batch = (u.batch || '').toLowerCase().trim();
-      const term = (u.term || '').toLowerCase().trim();
       const org = (u.organisation || u.client || '').toLowerCase().trim();
 
       return state.exams.filter((exam) => {
@@ -790,9 +807,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
           `${exam.description || ''} ${exam.title || ''} ${exam.code || ''}`.toLowerCase();
 
         if (section && hay.includes(`[section:${section}]`)) return true;
-        if (batch && hay.includes(`[batch:${batch}]`) && section && hay.includes(section))
+        if (
+          batch &&
+          hay.includes(`[batch:${batch}]`) &&
+          section &&
+          hay.includes(section)
+        )
           return true;
-        if (section && (hay.includes(section) || hay.includes(`section ${section}`))) {
+        if (
+          section &&
+          (hay.includes(section) || hay.includes(`section ${section}`))
+        ) {
           if (batch && hay.includes('batch') && !hay.includes(batch)) {
             return hay.includes(section);
           }
