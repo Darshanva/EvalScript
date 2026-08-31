@@ -49,19 +49,6 @@ import { toPath } from '../lib/routes';
 import { navigationRef } from '../lib/navigation';
 import { loadClaudeConfigFromCloud } from '../lib/claude-client';
 
-// inside init() or loadCloudData, early:
-const claudeCfg = await loadClaudeConfigFromCloud();
-if (claudeCfg.claudeApiKey || claudeCfg.aiMode) {
-  dispatch({
-    type: 'UPDATE_SYSTEM_SETTINGS',
-    settings: {
-      ...loadSavedSettings(),
-      ...claudeCfg,
-      aiProvider: claudeCfg.aiProvider || 'claude',
-    },
-  });
-}
-
 interface AppState {
   currentUser: User | null;
   page: PageRoute;
@@ -230,7 +217,6 @@ function appReducer(state: AppState, action: AppAction): AppState {
         ),
       };
     case 'ADD_CALIBRATION': {
-      // One calibration per student — replace on re-calibrate
       const others = state.calibrations.filter(
         (c) => c.studentId !== action.calibration.studentId
       );
@@ -284,10 +270,12 @@ function loadSavedSettings(): SystemSettings {
     const raw = localStorage.getItem('evalscript_system_settings');
     if (raw) {
       const parsed = JSON.parse(raw);
+      let model = parsed.claudeModel || 'claude-sonnet-4-6';
+      if (String(model).includes('20250514')) model = 'claude-sonnet-4-6';
       return {
         ...DEFAULT_SYSTEM_SETTINGS,
         ...parsed,
-        claudeModel: parsed.claudeModel || 'claude-sonnet-4-20250514',
+        claudeModel: model,
       };
     }
   } catch {
@@ -405,6 +393,28 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
     async function init() {
       dispatch({ type: 'SET_AUTH_LOADING', loading: true });
+
+      // Claude config from cloud — MUST be inside AppProvider (dispatch exists)
+      try {
+        const claudeCfg = await loadClaudeConfigFromCloud();
+        if (
+          mounted &&
+          (claudeCfg.claudeApiKey || claudeCfg.claudeModel || claudeCfg.aiMode)
+        ) {
+          dispatch({
+            type: 'UPDATE_SYSTEM_SETTINGS',
+            settings: {
+              ...loadSavedSettings(),
+              ...claudeCfg,
+              aiProvider: (claudeCfg.aiProvider as any) || 'claude',
+              aiMode: (claudeCfg.aiMode as any) || 'claude',
+            } as SystemSettings,
+          });
+        }
+      } catch (e) {
+        console.warn('claude config load', e);
+      }
+
       const {
         data: { session },
       } = await supabase.auth.getSession();
