@@ -383,7 +383,7 @@ function AppRoutes() {
           }
         />
         <Route
-          path="/admin/Claude"
+          path="/admin/groq"
           element={
             <ProtectedRoute roles={['admin']}>
               <AppLayout>
