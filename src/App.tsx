@@ -40,6 +40,7 @@ import HodDashboard from './pages/hod/HodDashboard';
 import HodStudentsPage from './pages/hod/HodStudentsPage';
 import HodStructurePage from './pages/hod/HodStructurePage';
 import HodAnalyticsPage from './pages/hod/HodAnalyticsPage';
+import HodFacultyPage from './pages/hod/HodFacultyPage';
 
 function NavigationBinder() {
   const navigate = useNavigate();
@@ -269,6 +270,16 @@ function AppRoutes() {
             </ProtectedRoute>
           }
         />
+        <Route
+  path="/hod/faculty"
+  element={
+    <ProtectedRoute roles={['hod']}>
+      <AppLayout>
+        <HodFacultyPage />
+      </AppLayout>
+    </ProtectedRoute>
+  }
+/>
         <Route
           path="/hod/students"
           element={

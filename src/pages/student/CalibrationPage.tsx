@@ -8,37 +8,13 @@ import { runCalibrationAnalysis } from '../../lib/calibration-ai';
 import { CALIBRATION_PASSAGE } from '../../lib/seed-data';
 import type { CalibrationSample } from '../../types';
 
-type Pace = 'slow' | 'medium' | 'fast';
-
-const PACE_META: { key: Pace; title: string; hint: string }[] = [
-  {
-    key: 'slow',
-    title: '1 · Slow',
-    hint: 'Copy the reference carefully and slowly, as neatly as you can.',
-  },
-  {
-    key: 'medium',
-    title: '2 · Medium',
-    hint: 'Copy at your normal natural exam pace.',
-  },
-  {
-    key: 'fast',
-    title: '3 · Fast',
-    hint: 'Copy quickly, as under time pressure.',
-  },
-];
-
 function genId() {
   return `cal-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-async function uploadCalFile(
-  file: File,
-  studentId: string,
-  pace: Pace
-): Promise<string> {
+async function uploadCalFile(file: File, studentId: string): Promise<string> {
   const ext = file.name.split('.').pop() || 'jpg';
-  const path = `calibration/${studentId}/${pace}-${Date.now()}.${ext}`;
+  const path = `calibration/${studentId}/sample-${Date.now()}.${ext}`;
 
   const { error } = await supabase.storage
     .from('answer-scripts')
@@ -69,11 +45,10 @@ export default function CalibrationPage() {
     ? state.calibrations.find((c) => c.studentId === user.id)
     : undefined;
 
-  const [urls, setUrls] = useState<Record<Pace, string | null>>({
-    slow: existing?.imageUrls?.slow || null,
-    medium: existing?.imageUrls?.medium || null,
-    fast: existing?.imageUrls?.fast || null,
-  });
+  const [previewUrl, setPreviewUrl] = useState<string | null>(
+    existing?.imageUrl || existing?.imageUrls?.slow || null
+  );
+  const [file, setFile] = useState<File | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [result, setResult] = useState<{
     qualityScore: number;
@@ -95,31 +70,34 @@ export default function CalibrationPage() {
       : null
   );
 
-  const inputRefs = {
-    slow: useRef<HTMLInputElement>(null),
-    medium: useRef<HTMLInputElement>(null),
-    fast: useRef<HTMLInputElement>(null),
-  };
+  const inputRef = useRef<HTMLInputElement>(null);
 
   if (!user) return null;
 
-  const allReady = !!(urls.slow && urls.medium && urls.fast);
-
-  async function onPick(pace: Pace, list: FileList | null) {
-    const file = list?.[0];
-    if (!file) return;
-    if (!file.type.startsWith('image/')) {
+  async function onPick(list: FileList | null) {
+    const f = list?.[0];
+    if (!f) return;
+    if (!f.type.startsWith('image/')) {
       showToast('Image only', 'error');
       return;
     }
 
-    const local = URL.createObjectURL(file);
-    setUrls((u) => ({ ...u, [pace]: local }));
+    if (previewUrl?.startsWith('blob:')) {
+      try {
+        URL.revokeObjectURL(previewUrl);
+      } catch {
+        /* ignore */
+      }
+    }
+
+    const local = URL.createObjectURL(f);
+    setFile(f);
+    setPreviewUrl(local);
     setResult(null);
 
     try {
-      const publicUrl = await uploadCalFile(file, user!.id, pace);
-      setUrls((u) => ({ ...u, [pace]: publicUrl }));
+      const publicUrl = await uploadCalFile(f, user!.id);
+      setPreviewUrl(publicUrl);
       if (publicUrl !== local) {
         try {
           URL.revokeObjectURL(local);
@@ -132,41 +110,40 @@ export default function CalibrationPage() {
     }
   }
 
-  function clearPace(pace: Pace) {
-    const prev = urls[pace];
-    if (prev?.startsWith('blob:')) {
+  function clearSample() {
+    if (previewUrl?.startsWith('blob:')) {
       try {
-        URL.revokeObjectURL(prev);
+        URL.revokeObjectURL(previewUrl);
       } catch {
         /* ignore */
       }
     }
-    setUrls((u) => ({ ...u, [pace]: null }));
+    setFile(null);
+    setPreviewUrl(null);
     setResult(null);
+    if (inputRef.current) inputRef.current.value = '';
   }
 
   async function runAnalysis() {
-    if (!allReady) {
-      showToast('Upload all 3 samples (slow, medium, fast)', 'error');
+    if (!previewUrl) {
+      showToast('Upload your calibration page first', 'error');
       return;
     }
     setAnalyzing(true);
     try {
       const analysis = await runCalibrationAnalysis({
-        slowUrl: urls.slow!,
-        mediumUrl: urls.medium!,
-        fastUrl: urls.fast!,
+        imageUrl: previewUrl,
         studentName: user!.name,
       });
 
       const sample: CalibrationSample = {
         id: existing?.id || genId(),
         studentId: user!.id,
-        imageUrl: urls.slow!,
+        imageUrl: previewUrl,
         imageUrls: {
-          slow: urls.slow!,
-          medium: urls.medium!,
-          fast: urls.fast!,
+          slow: previewUrl,
+          medium: previewUrl,
+          fast: previewUrl,
         },
         qualityScore: analysis.qualityScore,
         feedback: analysis.feedback,
@@ -204,11 +181,11 @@ export default function CalibrationPage() {
     <PageContainer>
       <PageHeader
         title="Handwriting Calibration"
-        subtitle="Copy the reference text three times (slow, medium, fast), then upload photos."
+        subtitle="Write slow, medium, and fast on ONE page under clear headings, then upload a photo."
         breadcrumb="Student Portal"
       />
 
-      {/* ——— Reference passage (what to write) ——— */}
+      {/* Reference + how to layout the page */}
       <Card className="mb-6 border-2 border-navy-200 bg-navy-50/40">
         <div className="flex items-start justify-between gap-3 mb-3">
           <div>
@@ -216,100 +193,98 @@ export default function CalibrationPage() {
               Reference — write this on paper
             </h3>
             <p className="text-xs text-navy-700 mt-1">
-              Use plain paper and a pen. Write the full passage once for each pace
-              (slow / medium / fast), then photograph each sheet.
+              Use one plain sheet. Write the full passage three times with these
+              headings: <strong>SLOW</strong>, <strong>MEDIUM</strong>,{' '}
+              <strong>FAST</strong>. Then photograph the whole page.
             </p>
           </div>
           <Badge variant="navy">Sample</Badge>
         </div>
-        <div className="rounded-xl bg-white border border-navy-100 p-4 sm:p-5">
+
+        <div className="rounded-xl bg-white border border-navy-100 p-4 sm:p-5 mb-4">
           <pre className="text-sm text-slate-800 whitespace-pre-wrap font-sans leading-relaxed">
             {CALIBRATION_PASSAGE}
           </pre>
         </div>
+
+        <div className="rounded-xl bg-white border border-dashed border-navy-200 p-4 text-sm text-slate-700 space-y-2">
+          <p className="font-medium text-slate-900">Page layout example</p>
+          <p>
+            <strong>SLOW</strong> — copy the passage carefully and neatly
+          </p>
+          <p>
+            <strong>MEDIUM</strong> — copy at your normal exam pace
+          </p>
+          <p>
+            <strong>FAST</strong> — copy quickly, as under time pressure
+          </p>
+        </div>
       </Card>
 
-      <div className="grid md:grid-cols-3 gap-4 mb-6">
-        {PACE_META.map((p) => (
-          <Card key={p.key} className="flex flex-col">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="font-semibold text-sm text-slate-900">{p.title}</h3>
-              {urls[p.key] && <Badge variant="success">Ready</Badge>}
-            </div>
-            <p className="text-xs text-slate-500 mb-3">{p.hint}</p>
+      {/* Single upload */}
+      <Card className="mb-6 max-w-xl">
+        <h3 className="font-semibold text-slate-900 text-sm mb-1">
+          Upload calibration page
+        </h3>
+        <p className="text-xs text-slate-500 mb-4">
+          One image only — your real photo, not a demo image.
+        </p>
 
-            {urls[p.key] ? (
-              <div className="relative rounded-lg overflow-hidden border border-slate-200 bg-white aspect-[3/4] mb-3">
-                <img
-                  src={urls[p.key]!}
-                  alt={p.title}
-                  className="w-full h-full object-contain"
-                />
-              </div>
-            ) : (
-              <button
-                type="button"
-                onClick={() => inputRefs[p.key].current?.click()}
-                className="aspect-[3/4] mb-3 border-2 border-dashed border-slate-300 rounded-lg flex flex-col items-center justify-center text-slate-400 hover:border-navy-400 hover:bg-slate-50"
-              >
-                <span className="text-2xl mb-1">↑</span>
-                <span className="text-xs text-center px-2">
-                  Photo of your {p.key} writing
-                </span>
-              </button>
-            )}
-
-            <input
-              ref={inputRefs[p.key]}
-              type="file"
-              accept="image/*"
-              capture="environment"
-              className="hidden"
-              onChange={(e) => onPick(p.key, e.target.files)}
+        {previewUrl ? (
+          <div className="relative rounded-xl overflow-hidden border border-slate-200 bg-white mb-4">
+            <img
+              src={previewUrl}
+              alt="Calibration sample"
+              className="w-full max-h-[420px] object-contain"
             />
-
-            <div className="flex gap-2 mt-auto">
-              <Button
-                size="sm"
-                variant="secondary"
-                className="flex-1"
-                onClick={() => inputRefs[p.key].current?.click()}
-              >
-                {urls[p.key] ? 'Replace' : 'Upload'}
-              </Button>
-              {urls[p.key] && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  className="text-red-600"
-                  onClick={() => clearPace(p.key)}
-                >
-                  ✕
-                </Button>
-              )}
-            </div>
-          </Card>
-        ))}
-      </div>
-
-      <div className="flex flex-wrap gap-3 mb-8">
-        <Button
-          loading={analyzing}
-          disabled={!allReady || analyzing}
-          onClick={runAnalysis}
-        >
-          {analyzing ? 'AI analysing…' : 'Analyse handwriting'}
-        </Button>
-        {(user.calibrated || result) && (
-          <Badge variant="success">Calibrated</Badge>
+          </div>
+        ) : (
+          <button
+            type="button"
+            onClick={() => inputRef.current?.click()}
+            className="w-full aspect-[4/3] mb-4 border-2 border-dashed border-slate-300 rounded-xl flex flex-col items-center justify-center text-slate-400 hover:border-navy-400 hover:bg-slate-50"
+          >
+            <span className="text-3xl mb-2">↑</span>
+            <span className="text-sm">Photo of your one page</span>
+          </button>
         )}
-      </div>
+
+        <input
+          ref={inputRef}
+          type="file"
+          accept="image/*"
+          capture="environment"
+          className="hidden"
+          onChange={(e) => onPick(e.target.files)}
+        />
+
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="secondary"
+            onClick={() => inputRef.current?.click()}
+          >
+            {previewUrl ? 'Replace photo' : 'Upload photo'}
+          </Button>
+          {previewUrl && (
+            <Button variant="ghost" className="text-red-600" onClick={clearSample}>
+              Clear
+            </Button>
+          )}
+          <Button
+            loading={analyzing}
+            disabled={!previewUrl || analyzing}
+            onClick={runAnalysis}
+          >
+            {analyzing ? 'AI analysing…' : 'Analyse handwriting'}
+          </Button>
+        </div>
+      </Card>
 
       {analyzing && (
         <Card className="mb-6 flex items-center gap-3">
           <Spinner size="md" />
           <p className="text-sm text-slate-600">
-            Transcribing samples and scoring handwriting quality…
+            Transcribing page and scoring slow / medium / fast sections…
           </p>
         </Card>
       )}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import {
@@ -8,6 +8,7 @@ import {
   Textarea,
   Select,
   Modal,
+  Badge,
 } from '../../components/ui';
 import { PageContainer, PageHeader } from '../../components/Layout';
 import type { Exam, Rubric, RubricQuestion } from '../../types';
@@ -22,9 +23,24 @@ import {
   type TreeLevel,
   type TreePath,
 } from '../../lib/exam-tree';
+import {
+  fetchAssignmentsForFaculty,
+  facultyCanAccessPath,
+  type FacultyAssignment,
+} from '../../lib/faculty-assignments';
 
-type Level = TreeLevel | 'form';
+type Level = TreeLevel | 'form' | 'multi-pick';
 type RubricMode = 'write' | 'upload';
+type CreateMode = 'assigned' | 'free';
+
+interface SectionTarget {
+  vertical: string;
+  org: string;
+  batch: string;
+  term: string;
+  section: string;
+  label: string;
+}
 
 const SUBJECTS = [
   { value: 'Computer Science', label: 'Computer Science' },
@@ -55,15 +71,136 @@ async function uploadExamFile(
   return data.publicUrl;
 }
 
+function filterItemsForFaculty(
+  items: string[],
+  level: TreeLevel,
+  path: TreePath,
+  assignments: FacultyAssignment[]
+): string[] {
+  if (!assignments.length) return [];
+
+  if (level === 'batch') {
+    const allowed = new Set(
+      assignments.map((a) => (a.batch || '').toLowerCase()).filter(Boolean)
+    );
+    const hasWildcard = assignments.some((a) => !a.batch);
+    if (hasWildcard || allowed.size === 0) return items;
+    return items.filter((b) => allowed.has(b.toLowerCase()));
+  }
+
+  if (level === 'term') {
+    const allowed = new Set(
+      assignments
+        .filter(
+          (a) =>
+            !a.batch ||
+            a.batch.toLowerCase() === (path.batch || '').toLowerCase()
+        )
+        .map((a) => (a.term || '').toLowerCase())
+        .filter(Boolean)
+    );
+    const hasWildcard = assignments.some(
+      (a) =>
+        (!a.batch ||
+          a.batch.toLowerCase() === (path.batch || '').toLowerCase()) &&
+        !a.term
+    );
+    if (hasWildcard || allowed.size === 0) return items;
+    return items.filter((t) => allowed.has(t.toLowerCase()));
+  }
+
+  if (level === 'section') {
+    return items.filter((name) =>
+      facultyCanAccessPath(assignments, {
+        org: path.org,
+        batch: path.batch,
+        term: path.term,
+        section: name,
+      })
+    );
+  }
+
+  if (level === 'org') {
+    const orgs = new Set(
+      assignments.map((a) => a.organisation.toLowerCase()).filter(Boolean)
+    );
+    if (!orgs.size) return items;
+    return items.filter((o) => orgs.has(o.toLowerCase()));
+  }
+
+  return items;
+}
+
+/** Flatten all sections under current tree path (for multi-select) */
+function collectSections(
+  tree: Record<string, any>,
+  path: TreePath,
+  assignments: FacultyAssignment[] | null
+): SectionTarget[] {
+  const out: SectionTarget[] = [];
+  const verticals = path.vertical
+    ? [path.vertical]
+    : Object.keys(tree || {});
+
+  for (const vertical of verticals) {
+    const orgs = path.org
+      ? [path.org]
+      : Object.keys(tree[vertical] || {});
+    for (const org of orgs) {
+      const batches = path.batch
+        ? [path.batch]
+        : Object.keys(tree[vertical]?.[org] || {});
+      for (const batch of batches) {
+        const terms = path.term
+          ? [path.term]
+          : Object.keys(tree[vertical]?.[org]?.[batch] || {});
+        for (const term of terms) {
+          const sections = Object.keys(
+            tree[vertical]?.[org]?.[batch]?.[term] || {}
+          );
+          for (const section of sections) {
+            if (assignments) {
+              const ok = facultyCanAccessPath(assignments, {
+                org,
+                batch,
+                term,
+                section,
+              });
+              if (!ok) continue;
+            }
+            out.push({
+              vertical,
+              org,
+              batch,
+              term,
+              section,
+              label: `${org} › ${batch} › ${term} › ${section}`,
+            });
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
 export default function CreateExamPage() {
   const { state, createExam, createRubric, showToast } = useApp();
   const navigate = useNavigate();
   const { currentUser } = state;
 
+  const [createMode, setCreateMode] = useState<CreateMode | null>(null);
   const [tree, setTree] = useState<Record<string, any>>({});
   const [treeLoading, setTreeLoading] = useState(true);
   const [level, setLevel] = useState<Level>('vertical');
   const [path, setPath] = useState<TreePath>({ ...EMPTY_PATH });
+
+  const [myAssignments, setMyAssignments] = useState<FacultyAssignment[]>([]);
+  const [assignLoading, setAssignLoading] = useState(true);
+
+  /** Multi-select targets (sections) */
+  const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
+  const [multiList, setMultiList] = useState<SectionTarget[]>([]);
 
   const [title, setTitle] = useState('');
   const [code, setCode] = useState('');
@@ -93,6 +230,7 @@ export default function CreateExamPage() {
 
   const [saving, setSaving] = useState(false);
   const [successModal, setSuccessModal] = useState(false);
+  const [successCount, setSuccessCount] = useState(0);
   const [formStep, setFormStep] = useState<0 | 1>(0);
 
   const qpAnsRef = useRef<HTMLInputElement>(null);
@@ -110,21 +248,50 @@ export default function CreateExamPage() {
     refresh();
     const onUpd = () => refresh();
     window.addEventListener('exam-tree-updated', onUpd);
-    window.addEventListener('storage', onUpd);
     return () => {
       cancelled = true;
       window.removeEventListener('exam-tree-updated', onUpd);
-      window.removeEventListener('storage', onUpd);
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+    async function loadAssign() {
+      if (!currentUser?.email) {
+        setAssignLoading(false);
+        return;
+      }
+      const list = await fetchAssignmentsForFaculty(currentUser.email);
+      if (!cancelled) {
+        setMyAssignments(list);
+        setAssignLoading(false);
+      }
+    }
+    loadAssign();
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUser?.email]);
+
   if (!currentUser) return null;
+
+  const useAssignFilter = createMode === 'assigned';
 
   const totalRubricMarks = questions.reduce((s, q) => s + (q.maxMarks || 0), 0);
   const treeLevel: TreeLevel =
-    level === 'form' ? 'subject' : (level as TreeLevel);
+    level === 'form' || level === 'multi-pick'
+      ? 'subject'
+      : (level as TreeLevel);
+
+  const rawItems =
+    level === 'form' || level === 'multi-pick'
+      ? []
+      : getItemsAtLevel(tree, treeLevel, path);
+
   const items =
-    level === 'form' ? [] : getItemsAtLevel(tree, treeLevel, path);
+    useAssignFilter && currentUser.role === 'faculty'
+      ? filterItemsForFaculty(rawItems, treeLevel, path, myAssignments)
+      : rawItems;
 
   const breadcrumbParts = [
     path.vertical,
@@ -148,23 +315,56 @@ export default function CreateExamPage() {
       setPath({ ...EMPTY_PATH, vertical: name });
       setLevel('org');
     } else if (level === 'org') {
-      setPath((p) => ({ ...p, org: name }));
+      setPath((p) => ({
+        ...p,
+        org: name,
+        batch: '',
+        term: '',
+        section: '',
+        subject: '',
+      }));
       setLevel('batch');
     } else if (level === 'batch') {
-      setPath((p) => ({ ...p, batch: name }));
+      setPath((p) => ({ ...p, batch: name, term: '', section: '', subject: '' }));
       setLevel('term');
     } else if (level === 'term') {
-      setPath((p) => ({ ...p, term: name }));
+      setPath((p) => ({ ...p, term: name, section: '', subject: '' }));
       setLevel('section');
     } else if (level === 'section') {
-      setPath((p) => ({ ...p, section: name }));
+      setPath((p) => ({ ...p, section: name, subject: '' }));
       setLevel('subject');
     } else if (level === 'subject') {
       setPath((p) => ({ ...p, subject: name }));
       setTitle(name);
+      // Single path still supported — also allow multi from section list
       setLevel('form');
       setFormStep(0);
+      setSelectedKeys(
+        new Set([
+          `${path.vertical}|${path.org}|${path.batch}|${path.term}|${name}`,
+        ])
+      );
     }
+  }
+
+  function openMultiPick() {
+    const list = collectSections(
+      tree,
+      path,
+      useAssignFilter ? myAssignments : null
+    );
+    setMultiList(list);
+    setSelectedKeys(new Set());
+    setLevel('multi-pick');
+  }
+
+  function toggleKey(key: string) {
+    setSelectedKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   }
 
   function jumpCrumb(index: number) {
@@ -181,6 +381,10 @@ export default function CreateExamPage() {
   function goBack() {
     if (level === 'form') {
       setLevel('subject');
+      return;
+    }
+    if (level === 'multi-pick') {
+      setLevel(path.term ? 'term' : path.batch ? 'batch' : 'org');
       return;
     }
     if (level === 'subject') {
@@ -208,7 +412,7 @@ export default function CreateExamPage() {
       setLevel('vertical');
       return;
     }
-    navigate('/faculty');
+    setCreateMode(null);
   }
 
   async function handleQpAnsChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -223,11 +427,8 @@ export default function CreateExamPage() {
     }
     setUploadingQpAns(false);
     setQpAnsUrls(urls);
-    if (urls.length) {
-      showToast(`${urls.length} file(s) uploaded (QP & Ans)`, 'success');
-    } else {
-      showToast('Upload failed — check storage bucket', 'error');
-    }
+    if (urls.length) showToast(`${urls.length} file(s) uploaded`, 'success');
+    else showToast('Upload failed', 'error');
   }
 
   async function handleRubricFileChange(
@@ -241,10 +442,31 @@ export default function CreateExamPage() {
     setUploadingRubric(false);
     if (url) {
       setRubricFileUrl(url);
-      showToast('Rubric file uploaded', 'success');
-    } else {
-      showToast('Rubric upload failed', 'error');
-    }
+      showToast('Rubric uploaded', 'success');
+    } else showToast('Rubric upload failed', 'error');
+  }
+
+  function buildNotesForTarget(t: SectionTarget): string {
+    const tags = [
+      t.vertical && `[vertical:${t.vertical}]`,
+      t.org && `[org:${t.org}]`,
+      t.batch && `[batch:${t.batch}]`,
+      t.term && `[term:${t.term}]`,
+      t.section && `[section:${t.section}]`,
+      path.subject && `[subject:${path.subject}]`,
+    ].filter(Boolean);
+
+    return [
+      description.trim(),
+      `Path: ${t.label}${path.subject ? ` › ${path.subject}` : ''}`,
+      ...tags,
+      t.batch ? `Batch: ${t.batch}` : '',
+      t.term ? `Term: ${t.term}` : '',
+      qpAnsUrls.length ? `QP&Ans: ${qpAnsUrls.join(', ')}` : '',
+      rubricFileUrl ? `RubricFile: ${rubricFileUrl}` : '',
+    ]
+      .filter(Boolean)
+      .join('\n');
   }
 
   async function handleSave() {
@@ -252,106 +474,134 @@ export default function CreateExamPage() {
       showToast('Fill title, code and date', 'error');
       return;
     }
+
+    const targets: SectionTarget[] = [];
+    if (selectedKeys.size > 0) {
+      const fromMulti = multiList.filter((t) =>
+        selectedKeys.has(
+          `${t.vertical}|${t.org}|${t.batch}|${t.term}|${t.section}`
+        )
+      );
+      if (fromMulti.length) targets.push(...fromMulti);
+      else if (path.section) {
+        targets.push({
+          vertical: path.vertical,
+          org: path.org,
+          batch: path.batch,
+          term: path.term,
+          section: path.section,
+          label: breadcrumbParts.join(' › '),
+        });
+      }
+    } else if (path.section) {
+      targets.push({
+        vertical: path.vertical,
+        org: path.org,
+        batch: path.batch,
+        term: path.term,
+        section: path.section,
+        label: breadcrumbParts.join(' › '),
+      });
+    }
+
+    if (!targets.length) {
+      showToast('Select at least one section', 'error');
+      return;
+    }
+
+    if (useAssignFilter) {
+      for (const t of targets) {
+        if (
+          !facultyCanAccessPath(myAssignments, {
+            org: t.org,
+            batch: t.batch,
+            term: t.term,
+            section: t.section,
+          })
+        ) {
+          showToast(`Not assigned to ${t.section}`, 'error');
+          return;
+        }
+      }
+    }
+
     if (
       rubricMode === 'write' &&
       questions.every((q) => !q.questionText?.trim())
     ) {
-      showToast('Add question text, or switch to Upload rubric', 'error');
+      showToast('Add question text or upload rubric', 'error');
       return;
     }
     if (rubricMode === 'upload' && !rubricFileUrl && !rubricFile) {
-      showToast('Upload a rubric file, or switch to Write', 'error');
+      showToast('Upload rubric or switch to Write', 'error');
       return;
     }
 
     setSaving(true);
+    let created = 0;
     try {
-      const examId = genId('exam');
-      const rubricId = genId('rubric');
+      for (const t of targets) {
+        const examId = genId('exam');
+        const rubricId = genId('rubric');
+        const exam: Exam = {
+          id: examId,
+          title: title.trim(),
+          code: `${code.trim().toUpperCase()}${
+            targets.length > 1 ? `-${t.section.replace(/\s+/g, '')}` : ''
+          }`,
+          subject,
+          facultyId: currentUser.id,
+          facultyName: currentUser.name,
+          date,
+          duration: parseInt(duration, 10) || 180,
+          maxMarks:
+            rubricMode === 'write' ? totalRubricMarks : totalRubricMarks || 100,
+          status: 'ACTIVE',
+          studentIds: [],
+          rubricId,
+          description: buildNotesForTarget(t),
+          createdAt: new Date().toISOString(),
+        };
 
-      const hierarchyPath =
-        typeof formatHierarchyPath === 'function'
-          ? formatHierarchyPath(path)
-          : breadcrumbParts.join(' › ');
+        const rubric: Rubric = {
+          id: rubricId,
+          examId,
+          questions:
+            rubricMode === 'write'
+              ? questions
+              : [
+                  {
+                    id: genId('rq'),
+                    number: '1',
+                    questionText: rubricFile
+                      ? `See uploaded rubric: ${rubricFile.name}`
+                      : 'See uploaded rubric',
+                    maxMarks: totalRubricMarks || 100,
+                    criteria: [
+                      {
+                        id: genId('rc'),
+                        description: rubricFileUrl || 'Uploaded rubric',
+                        maxMarks: totalRubricMarks || 100,
+                      },
+                    ],
+                  },
+                ],
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
 
-      // Machine-readable tags for student matching (AppContext)
-      const tags = [
-        path.vertical && `[vertical:${path.vertical}]`,
-        path.org && `[org:${path.org}]`,
-        path.batch && `[batch:${path.batch}]`,
-        path.term && `[term:${path.term}]`,
-        path.section && `[section:${path.section}]`,
-        path.subject && `[subject:${path.subject}]`,
-      ].filter(Boolean);
-
-      const sectionLabel = path.section
-        ? path.section.match(/^[A-Za-z]$/)
-          ? `Section ${path.section.toUpperCase()}`
-          : path.section
-        : '';
-
-      const extraNotes = [
-        description.trim(),
-        hierarchyPath ? `Path: ${hierarchyPath}` : '',
-        ...tags,
-        sectionLabel,
-        path.batch ? `Batch: ${path.batch}` : '',
-        path.term ? `Term: ${path.term}` : '',
-        qpAnsUrls.length ? `QP&Ans: ${qpAnsUrls.join(', ')}` : '',
-        rubricFileUrl ? `RubricFile: ${rubricFileUrl}` : '',
-      ]
-        .filter(Boolean)
-        .join('\n');
-
-      const exam: Exam = {
-        id: examId,
-        title: title.trim(),
-        code: code.trim().toUpperCase(),
-        subject,
-        facultyId: currentUser.id,
-        facultyName: currentUser.name,
-        date,
-        duration: parseInt(duration, 10) || 180,
-        maxMarks:
-          rubricMode === 'write' ? totalRubricMarks : totalRubricMarks || 100,
-        status: 'ACTIVE',
-        studentIds: [],
-        rubricId,
-        description: extraNotes,
-        createdAt: new Date().toISOString(),
-      };
-
-      const rubric: Rubric = {
-        id: rubricId,
-        examId,
-        questions:
-          rubricMode === 'write'
-            ? questions
-            : [
-                {
-                  id: genId('rq'),
-                  number: '1',
-                  questionText: rubricFile
-                    ? `See uploaded rubric: ${rubricFile.name}`
-                    : 'See uploaded rubric file',
-                  maxMarks: totalRubricMarks || 100,
-                  criteria: [
-                    {
-                      id: genId('rc'),
-                      description: rubricFileUrl || 'Uploaded rubric',
-                      maxMarks: totalRubricMarks || 100,
-                    },
-                  ],
-                },
-              ],
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-
-      await createExam(exam);
-      createRubric(rubric);
+        await createExam(exam);
+        createRubric(rubric);
+        created++;
+      }
+      setSuccessCount(created);
       setSuccessModal(true);
-      showToast('Exam saved for batch/section', 'success');
+      showToast(
+        created > 1
+          ? `Created ${created} exams (one per section)`
+          : 'Exam saved',
+        'success'
+      );
     } catch (e: any) {
       console.error(e);
       showToast(e?.message || 'Save failed', 'error');
@@ -360,7 +610,148 @@ export default function CreateExamPage() {
     }
   }
 
+  // ——— Mode picker ———
+  if (createMode === null) {
+    return (
+      <PageContainer>
+        <PageHeader
+          title="Create Exam"
+          subtitle="Choose how you want to pick sections"
+          breadcrumb="Faculty"
+          showBack
+          backTo="/faculty"
+        />
+        <div className="grid sm:grid-cols-2 gap-4 max-w-2xl">
+          <button
+            type="button"
+            onClick={() => {
+              setCreateMode('assigned');
+              setLevel('vertical');
+              setPath({ ...EMPTY_PATH });
+            }}
+            className="text-left p-6 rounded-xl border-2 border-navy-200 bg-navy-50/40 hover:border-navy-500 transition-all"
+          >
+            <p className="font-semibold text-navy-900 text-lg mb-1">
+              HOD assigned
+            </p>
+            <p className="text-sm text-slate-600">
+              Only batches / terms / sections your HOD assigned to you.
+            </p>
+            {!assignLoading && (
+              <p className="text-xs text-slate-500 mt-2">
+                {myAssignments.length} assignment
+                {myAssignments.length !== 1 ? 's' : ''}
+              </p>
+            )}
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setCreateMode('free');
+              setLevel('vertical');
+              setPath({ ...EMPTY_PATH });
+            }}
+            className="text-left p-6 rounded-xl border-2 border-slate-200 bg-white hover:border-navy-400 transition-all"
+          >
+            <p className="font-semibold text-slate-900 text-lg mb-1">
+              Create freely
+            </p>
+            <p className="text-sm text-slate-600">
+              Full Exam Structure — same as before. Any path.
+            </p>
+          </button>
+        </div>
+      </PageContainer>
+    );
+  }
+
+  // ——— Multi-select sections ———
+  if (level === 'multi-pick') {
+    return (
+      <PageContainer>
+        <PageHeader
+          title="Select sections"
+          subtitle="Check one or more sections — one exam will be created for each"
+          breadcrumb="Faculty"
+          showBack
+          backTo="/faculty"
+        />
+        <Button variant="ghost" size="sm" className="mb-4" onClick={goBack}>
+          ← Back
+        </Button>
+
+        {multiList.length === 0 ? (
+          <Card>
+            <p className="text-sm text-slate-500 text-center py-8">
+              No sections found under this path.
+            </p>
+          </Card>
+        ) : (
+          <Card className="space-y-2 mb-4">
+            {multiList.map((t) => {
+              const key = `${t.vertical}|${t.org}|${t.batch}|${t.term}|${t.section}`;
+              const checked = selectedKeys.has(key);
+              return (
+                <label
+                  key={key}
+                  className={`flex items-center gap-3 p-3 rounded-lg border cursor-pointer ${
+                    checked
+                      ? 'border-navy-500 bg-navy-50'
+                      : 'border-slate-200 hover:bg-slate-50'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleKey(key)}
+                    className="w-4 h-4"
+                  />
+                  <span className="text-sm text-slate-800">{t.label}</span>
+                </label>
+              );
+            })}
+          </Card>
+        )}
+
+        <div className="flex gap-3">
+          <Button
+            variant="secondary"
+            onClick={() => {
+              setSelectedKeys(
+                new Set(
+                  multiList.map(
+                    (t) =>
+                      `${t.vertical}|${t.org}|${t.batch}|${t.term}|${t.section}`
+                  )
+                )
+              );
+            }}
+          >
+            Select all
+          </Button>
+          <Button
+            disabled={selectedKeys.size === 0}
+            onClick={() => {
+              setLevel('form');
+              setFormStep(0);
+              if (!title && multiList[0]) setTitle(multiList[0].section);
+            }}
+          >
+            Continue ({selectedKeys.size}) →
+          </Button>
+        </div>
+      </PageContainer>
+    );
+  }
+
+  // ——— Tree browse ———
   if (level !== 'form') {
+    const noAssign =
+      useAssignFilter &&
+      currentUser.role === 'faculty' &&
+      !assignLoading &&
+      myAssignments.length === 0;
+
     return (
       <PageContainer>
         <PageHeader
@@ -369,11 +760,28 @@ export default function CreateExamPage() {
               ? 'Select Vertical / Client'
               : LEVEL_TITLES[level as TreeLevel]
           }
-          subtitle="Pick Batch → Term → Section → Subject. Exams are for the section, not individual students."
+          subtitle={
+            useAssignFilter
+              ? 'HOD-assigned paths only'
+              : 'Full structure — create freely'
+          }
           breadcrumb="Faculty"
           showBack
           backTo="/faculty"
         />
+
+        <div className="mb-3 flex flex-wrap gap-2 items-center">
+          <Badge variant={useAssignFilter ? 'navy' : 'muted'}>
+            {useAssignFilter ? 'Assigned' : 'Free'}
+          </Badge>
+          <button
+            type="button"
+            className="text-xs text-navy-600 hover:underline"
+            onClick={() => setCreateMode(null)}
+          >
+            Change mode
+          </button>
+        </div>
 
         <div className="mb-4 flex flex-wrap items-center gap-1 text-sm text-slate-500">
           <button
@@ -397,23 +805,44 @@ export default function CreateExamPage() {
           ))}
         </div>
 
-        <div className="flex items-center mb-4">
+        <div className="flex flex-wrap items-center gap-2 mb-4">
           <Button variant="ghost" size="sm" onClick={goBack}>
             ← Back
           </Button>
+          {(level === 'org' ||
+            level === 'batch' ||
+            level === 'term' ||
+            level === 'section') && (
+            <Button size="sm" variant="secondary" onClick={openMultiPick}>
+              Multi-select sections ☑
+            </Button>
+          )}
         </div>
 
-        {treeLoading ? (
+        {treeLoading || assignLoading ? (
           <Card>
             <p className="text-sm text-slate-500 text-center py-10">
-              Loading structure…
+              Loading…
+            </p>
+          </Card>
+        ) : noAssign ? (
+          <Card>
+            <p className="text-sm text-amber-800 text-center py-10">
+              No HOD assignments.
+              <br />
+              <button
+                type="button"
+                className="text-navy-700 underline text-xs mt-2"
+                onClick={() => setCreateMode('free')}
+              >
+                Switch to Create freely
+              </button>
             </p>
           </Card>
         ) : items.length === 0 ? (
           <Card>
             <p className="text-sm text-slate-500 text-center py-10">
-              Nothing here. Ask Admin / HOD to add items under{' '}
-              <strong>Exam Structure</strong>.
+              Nothing here.
             </p>
           </Card>
         ) : (
@@ -435,46 +864,40 @@ export default function CreateExamPage() {
     );
   }
 
+  // ——— Form ———
   return (
     <PageContainer>
       <PageHeader
         title="Create Exam"
-        subtitle={breadcrumbParts.join(' › ')}
+        subtitle={
+          selectedKeys.size > 1
+            ? `${selectedKeys.size} sections selected`
+            : breadcrumbParts.join(' › ')
+        }
         breadcrumb="Faculty"
         showBack
         backTo="/faculty"
       />
 
-      <div className="mb-4 flex flex-wrap items-center gap-1 text-sm text-slate-500">
-        <button
-          type="button"
-          className="text-navy-600 hover:underline"
-          onClick={() => jumpCrumb(-1)}
-        >
-          Root
-        </button>
-        {crumbsForJump.map((part, i) => (
-          <span key={i} className="flex items-center gap-1">
-            <span className="text-slate-300">›</span>
-            <button
-              type="button"
-              className="font-medium text-navy-700 hover:underline"
-              onClick={() => jumpCrumb(i)}
-            >
-              {part}
-            </button>
-          </span>
-        ))}
-        {path.subject && (
-          <span className="flex items-center gap-1">
-            <span className="text-slate-300">›</span>
-            <span className="font-medium text-slate-700">{path.subject}</span>
-          </span>
-        )}
-      </div>
+      {selectedKeys.size > 0 && (
+        <Card className="mb-4 text-xs text-slate-600">
+          <p className="font-medium text-slate-800 mb-1">
+            Will create {selectedKeys.size} exam
+            {selectedKeys.size !== 1 ? 's' : ''} (one per section)
+          </p>
+          <ul className="list-disc pl-4 space-y-0.5">
+            {[...selectedKeys].slice(0, 8).map((k) => (
+              <li key={k}>{k.split('|').slice(1).join(' › ')}</li>
+            ))}
+            {selectedKeys.size > 8 && (
+              <li>…and {selectedKeys.size - 8} more</li>
+            )}
+          </ul>
+        </Card>
+      )}
 
       <Button variant="ghost" size="sm" className="mb-4" onClick={goBack}>
-        ← Back to subjects
+        ← Back
       </Button>
 
       <div className="flex gap-2 mb-6 text-xs font-medium">
@@ -535,16 +958,6 @@ export default function CreateExamPage() {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
             />
-            <p className="text-xs text-slate-500">
-              Target: <strong>{breadcrumbParts.join(' › ') || '—'}</strong>
-              {path.section ? (
-                <>
-                  {' '}
-                  · Section:{' '}
-                  <strong>{path.section}</strong>
-                </>
-              ) : null}
-            </p>
           </Card>
           <Button
             disabled={!title || !code || !date}
@@ -561,9 +974,6 @@ export default function CreateExamPage() {
             <h3 className="font-semibold text-navy-900 text-center mb-1">
               Upload QP &amp; Ans
             </h3>
-            <p className="text-xs text-slate-500 text-center mb-5">
-              Question paper + answer key (multiple files OK)
-            </p>
             <div className="rounded-xl border border-slate-200 bg-white p-6 text-center">
               <input
                 ref={qpAnsRef}
@@ -580,32 +990,19 @@ export default function CreateExamPage() {
               >
                 {qpAnsFiles.length ? 'Change files' : 'Upload'}
               </Button>
-              {qpAnsFiles.length > 0 && (
-                <ul className="mt-3 space-y-1">
-                  {qpAnsFiles.map((f) => (
-                    <li
-                      key={f.name + f.size}
-                      className="text-xs text-emerald-600 truncate"
-                    >
-                      ✓ {f.name}
-                    </li>
-                  ))}
-                </ul>
-              )}
             </div>
           </Card>
 
           <Card>
             <h3 className="font-semibold text-slate-900 mb-1">Rubrics</h3>
-            <p className="text-xs text-slate-500 mb-4">Write or upload</p>
             <div className="flex gap-2 mb-5">
               <button
                 type="button"
                 onClick={() => setRubricMode('write')}
                 className={`flex-1 py-3 rounded-xl border-2 text-sm font-medium ${
                   rubricMode === 'write'
-                    ? 'border-navy-700 bg-navy-50 text-navy-900'
-                    : 'border-slate-200 text-slate-600'
+                    ? 'border-navy-700 bg-navy-50'
+                    : 'border-slate-200'
                 }`}
               >
                 Write
@@ -615,8 +1012,8 @@ export default function CreateExamPage() {
                 onClick={() => setRubricMode('upload')}
                 className={`flex-1 py-3 rounded-xl border-2 text-sm font-medium ${
                   rubricMode === 'upload'
-                    ? 'border-navy-700 bg-navy-50 text-navy-900'
-                    : 'border-slate-200 text-slate-600'
+                    ? 'border-navy-700 bg-navy-50'
+                    : 'border-slate-200'
                 }`}
               >
                 Upload
@@ -638,24 +1035,16 @@ export default function CreateExamPage() {
                   loading={uploadingRubric}
                   onClick={() => rubricRef.current?.click()}
                 >
-                  {rubricFile ? 'Change file' : 'Choose rubric file'}
+                  {rubricFile ? 'Change file' : 'Choose rubric'}
                 </Button>
-                {rubricFile && (
-                  <p className="text-xs text-emerald-600 mt-3">
-                    ✓ {rubricFile.name}
-                  </p>
-                )}
               </div>
             )}
 
             {rubricMode === 'write' && (
               <div className="space-y-4">
-                <div className="flex justify-between items-center">
+                <div className="flex justify-between">
                   <p className="text-sm text-slate-500">
-                    Total:{' '}
-                    <span className="font-mono font-semibold">
-                      {totalRubricMarks}
-                    </span>
+                    Total: <span className="font-mono">{totalRubricMarks}</span>
                   </p>
                   <Button
                     size="sm"
@@ -684,22 +1073,7 @@ export default function CreateExamPage() {
                 </div>
                 {questions.map((q, qi) => (
                   <Card key={q.id} className="space-y-3 bg-slate-50">
-                    <div className="flex justify-between">
-                      <span className="font-medium">Q{qi + 1}</span>
-                      {questions.length > 1 && (
-                        <button
-                          type="button"
-                          className="text-xs text-red-500"
-                          onClick={() =>
-                            setQuestions((prev) =>
-                              prev.filter((x) => x.id !== q.id)
-                            )
-                          }
-                        >
-                          Remove
-                        </button>
-                      )}
-                    </div>
+                    <span className="font-medium">Q{qi + 1}</span>
                     <Textarea
                       label="Question text"
                       rows={2}
@@ -743,6 +1117,7 @@ export default function CreateExamPage() {
             </Button>
             <Button loading={saving} onClick={handleSave}>
               Create Exam
+              {selectedKeys.size > 1 ? ` × ${selectedKeys.size}` : ''}
             </Button>
           </div>
         </div>
@@ -758,13 +1133,9 @@ export default function CreateExamPage() {
       >
         <div className="text-center py-4">
           <p className="font-semibold text-slate-900 mb-2">
-            &ldquo;{title}&rdquo; is live
-          </p>
-          <p className="text-xs text-slate-500 mb-1">
-            {breadcrumbParts.join(' › ')}
-          </p>
-          <p className="text-xs text-slate-400 mb-4">
-            Tags saved for student section matching
+            {successCount > 1
+              ? `${successCount} exams created`
+              : `“${title}” is live`}
           </p>
           <Button
             className="w-full"

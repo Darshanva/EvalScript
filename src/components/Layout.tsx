@@ -39,6 +39,7 @@ const ADMIN_NAV: NavItem[] = [
 const HOD_NAV: NavItem[] = [
   { path: '/hod', label: 'Dashboard', icon: '⊞' },
   { path: '/hod/students', label: 'Students', icon: '⋯' },
+  { path: '/hod/faculty', label: 'Faculty', icon: '◎' }, // NEW
   { path: '/hod/structure', label: 'Structure', icon: '▤' },
   { path: '/hod/analytics', label: 'Analytics', icon: '≋' },
 ];

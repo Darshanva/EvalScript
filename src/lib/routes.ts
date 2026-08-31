@@ -21,6 +21,13 @@ export const ROUTE_MAP: Record<string, string> = {
   'a-audit': '/admin/audit',
   'a-settings': '/admin/settings',
   'a-groq': '/admin/groq',
+  'a-structure': '/admin/structure',
+  'a-publish-rights': '/admin/publish-rights',
+  'h-dashboard': '/hod',
+  'h-students': '/hod/students',
+  'h-faculty': '/hod/faculty',
+  'h-structure': '/hod/structure',
+  'h-analytics': '/hod/analytics',
 };
 
 export function toPath(pageOrPath: string): string {
@@ -32,5 +39,6 @@ export function roleHome(role: string): string {
   if (role === 'student') return '/student';
   if (role === 'faculty') return '/faculty';
   if (role === 'admin') return '/admin';
+  if (role === 'hod') return '/hod';
   return '/';
 }
