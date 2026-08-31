@@ -177,7 +177,7 @@ export default function UsagePage() {
                   >
                     {systemSettings.aiMode === 'demo'
                       ? 'Demo Mode'
-                      : 'Production (Groq)'}
+                      : 'Production (Claude)'}
                   </Badge>
                 </dd>
               </div>
@@ -190,7 +190,7 @@ export default function UsagePage() {
               <div>
                 <dt className="text-xs text-slate-400 mb-0.5">Model</dt>
                 <dd className="font-mono text-xs text-slate-600">
-                  {systemSettings.groqModel || '—'}
+                  {systemSettings.claudeModel || '—'}
                 </dd>
               </div>
               <div>
@@ -204,7 +204,7 @@ export default function UsagePage() {
             <h3 className="font-semibold text-slate-900 text-sm mb-2">Note</h3>
             <p className="text-xs text-slate-600 leading-relaxed">
               User counts, exams, and submissions come from Supabase in real time.
-              AI request history uses recorded usage rows. Switch AI mode to Groq
+              AI request history uses recorded usage rows. Claude Setup lo key + model set cheyyi
               in Settings and add a server-side API key for live model calls.
             </p>
           </Card>

@@ -47,6 +47,20 @@ import {
 } from '../lib/db';
 import { toPath } from '../lib/routes';
 import { navigationRef } from '../lib/navigation';
+import { loadClaudeConfigFromCloud } from '../lib/claude-client';
+
+// inside init() or loadCloudData, early:
+const claudeCfg = await loadClaudeConfigFromCloud();
+if (claudeCfg.claudeApiKey || claudeCfg.aiMode) {
+  dispatch({
+    type: 'UPDATE_SYSTEM_SETTINGS',
+    settings: {
+      ...loadSavedSettings(),
+      ...claudeCfg,
+      aiProvider: claudeCfg.aiProvider || 'claude',
+    },
+  });
+}
 
 interface AppState {
   currentUser: User | null;
