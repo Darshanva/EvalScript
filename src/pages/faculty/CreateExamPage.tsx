@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import {
@@ -19,7 +19,6 @@ import {
   EMPTY_PATH,
   LEVEL_TITLES,
   pathFromCrumbs,
-  formatHierarchyPath,
   type TreeLevel,
   type TreePath,
 } from '../../lib/exam-tree';
@@ -131,16 +130,13 @@ function filterItemsForFaculty(
   return items;
 }
 
-/** Flatten all sections under current tree path (for multi-select) */
 function collectSections(
   tree: Record<string, any>,
   path: TreePath,
   assignments: FacultyAssignment[] | null
 ): SectionTarget[] {
   const out: SectionTarget[] = [];
-  const verticals = path.vertical
-    ? [path.vertical]
-    : Object.keys(tree || {});
+  const verticals = path.vertical ? [path.vertical] : Object.keys(tree || {});
 
   for (const vertical of verticals) {
     const orgs = path.org
@@ -198,7 +194,6 @@ export default function CreateExamPage() {
   const [myAssignments, setMyAssignments] = useState<FacultyAssignment[]>([]);
   const [assignLoading, setAssignLoading] = useState(true);
 
-  /** Multi-select targets (sections) */
   const [selectedKeys, setSelectedKeys] = useState<Set<string>>(new Set());
   const [multiList, setMultiList] = useState<SectionTarget[]>([]);
 
@@ -212,6 +207,11 @@ export default function CreateExamPage() {
   const [qpAnsFiles, setQpAnsFiles] = useState<File[]>([]);
   const [qpAnsUrls, setQpAnsUrls] = useState<string[]>([]);
   const [uploadingQpAns, setUploadingQpAns] = useState(false);
+
+  // Question paper for students only
+  const [qpOnlyFile, setQpOnlyFile] = useState<File | null>(null);
+  const [qpOnlyUrl, setQpOnlyUrl] = useState('');
+  const [uploadingQpOnly, setUploadingQpOnly] = useState(false);
 
   const [rubricMode, setRubricMode] = useState<RubricMode>('write');
   const [rubricFile, setRubricFile] = useState<File | null>(null);
@@ -234,6 +234,7 @@ export default function CreateExamPage() {
   const [formStep, setFormStep] = useState<0 | 1>(0);
 
   const qpAnsRef = useRef<HTMLInputElement>(null);
+  const qpOnlyRef = useRef<HTMLInputElement>(null);
   const rubricRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -336,7 +337,6 @@ export default function CreateExamPage() {
     } else if (level === 'subject') {
       setPath((p) => ({ ...p, subject: name }));
       setTitle(name);
-      // Single path still supported — also allow multi from section list
       setLevel('form');
       setFormStep(0);
       setSelectedKeys(
@@ -431,6 +431,21 @@ export default function CreateExamPage() {
     else showToast('Upload failed', 'error');
   }
 
+  async function handleQpOnlyChange(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setQpOnlyFile(file);
+    setUploadingQpOnly(true);
+    const url = await uploadExamFile(file, 'question-papers');
+    setUploadingQpOnly(false);
+    if (url) {
+      setQpOnlyUrl(url);
+      showToast('Question paper uploaded — students can open it', 'success');
+    } else {
+      showToast('Question paper upload failed', 'error');
+    }
+  }
+
   async function handleRubricFileChange(
     e: React.ChangeEvent<HTMLInputElement>
   ) {
@@ -464,6 +479,7 @@ export default function CreateExamPage() {
       t.term ? `Term: ${t.term}` : '',
       qpAnsUrls.length ? `QP&Ans: ${qpAnsUrls.join(', ')}` : '',
       rubricFileUrl ? `RubricFile: ${rubricFileUrl}` : '',
+      qpOnlyUrl ? `QuestionPaper: ${qpOnlyUrl}` : '',
     ]
       .filter(Boolean)
       .join('\n');
@@ -560,6 +576,7 @@ export default function CreateExamPage() {
           studentIds: [],
           rubricId,
           description: buildNotesForTarget(t),
+          questionPaperUrl: qpOnlyUrl || undefined,
           createdAt: new Date().toISOString(),
         };
 
@@ -610,7 +627,6 @@ export default function CreateExamPage() {
     }
   }
 
-  // ——— Mode picker ———
   if (createMode === null) {
     return (
       <PageContainer>
@@ -665,7 +681,6 @@ export default function CreateExamPage() {
     );
   }
 
-  // ——— Multi-select sections ———
   if (level === 'multi-pick') {
     return (
       <PageContainer>
@@ -744,7 +759,6 @@ export default function CreateExamPage() {
     );
   }
 
-  // ——— Tree browse ———
   if (level !== 'form') {
     const noAssign =
       useAssignFilter &&
@@ -821,9 +835,7 @@ export default function CreateExamPage() {
 
         {treeLoading || assignLoading ? (
           <Card>
-            <p className="text-sm text-slate-500 text-center py-10">
-              Loading…
-            </p>
+            <p className="text-sm text-slate-500 text-center py-10">Loading…</p>
           </Card>
         ) : noAssign ? (
           <Card>
@@ -864,7 +876,6 @@ export default function CreateExamPage() {
     );
   }
 
-  // ——— Form ———
   return (
     <PageContainer>
       <PageHeader
@@ -974,6 +985,9 @@ export default function CreateExamPage() {
             <h3 className="font-semibold text-navy-900 text-center mb-1">
               Upload QP &amp; Ans
             </h3>
+            <p className="text-xs text-slate-500 text-center mb-4">
+              Faculty reference (question paper + answer key)
+            </p>
             <div className="rounded-xl border border-slate-200 bg-white p-6 text-center">
               <input
                 ref={qpAnsRef}
@@ -990,6 +1004,42 @@ export default function CreateExamPage() {
               >
                 {qpAnsFiles.length ? 'Change files' : 'Upload'}
               </Button>
+              {qpAnsFiles.length > 0 && (
+                <p className="text-xs text-slate-500 mt-2">
+                  {qpAnsFiles.length} file(s)
+                </p>
+              )}
+            </div>
+          </Card>
+
+          {/* NEW: Question paper visible to students */}
+          <Card className="border-2 border-dashed border-emerald-200 bg-emerald-50/30">
+            <h3 className="font-semibold text-emerald-900 text-center mb-1">
+              Question Paper (for students)
+            </h3>
+            <p className="text-xs text-slate-500 text-center mb-4">
+              Students can open / download this while submitting answers
+            </p>
+            <div className="rounded-xl border border-slate-200 bg-white p-6 text-center">
+              <input
+                ref={qpOnlyRef}
+                type="file"
+                className="hidden"
+                accept=".pdf,.doc,.docx,.jpg,.jpeg,.png,.webp"
+                onChange={handleQpOnlyChange}
+              />
+              <Button
+                variant="secondary"
+                loading={uploadingQpOnly}
+                onClick={() => qpOnlyRef.current?.click()}
+              >
+                {qpOnlyFile ? 'Change Question Paper' : 'Upload Question Paper'}
+              </Button>
+              {qpOnlyFile && (
+                <p className="text-xs text-emerald-700 mt-3 truncate">
+                  ✓ {qpOnlyFile.name}
+                </p>
+              )}
             </div>
           </Card>
 
@@ -1044,7 +1094,8 @@ export default function CreateExamPage() {
               <div className="space-y-4">
                 <div className="flex justify-between">
                   <p className="text-sm text-slate-500">
-                    Total: <span className="font-mono">{totalRubricMarks}</span>
+                    Total:{' '}
+                    <span className="font-mono">{totalRubricMarks}</span>
                   </p>
                   <Button
                     size="sm"

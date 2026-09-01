@@ -4,7 +4,7 @@ import { useApp } from '../../context/AppContext';
 import { Button, Card, Spinner, Modal } from '../../components/ui';
 import { PageContainer, PageHeader } from '../../components/Layout';
 import { StepIndicator } from '../../components/ui';
-import type { Submission, SubmissionPage } from '../../types';
+import type { Exam, Submission, SubmissionPage } from '../../types';
 import { uploadAnswerPage } from '../../lib/storage';
 
 type WizardStep = 'select-exam' | 'upload' | 'review' | 'confirm' | 'submitted';
@@ -15,6 +15,15 @@ interface PageItem {
   imageUrl: string;
   thumbnailUrl: string;
   fileName: string;
+}
+
+function getQuestionPaperUrl(
+  exam: Pick<Exam, 'questionPaperUrl' | 'description'> | null | undefined
+): string | null {
+  if (!exam) return null;
+  if (exam.questionPaperUrl) return exam.questionPaperUrl;
+  const m = (exam.description || '').match(/QuestionPaper:\s*(\S+)/i);
+  return m?.[1] || null;
 }
 
 export default function SubmitExamPage() {
@@ -51,10 +60,12 @@ export default function SubmitExamPage() {
   const submittedExamIds = new Set(submissions.map((s) => s.examId));
   const availableExams = exams.filter((e) => !submittedExamIds.has(e.id));
   const selectedExam = exams.find((e) => e.id === selectedExamId);
+  const qpUrl = getQuestionPaperUrl(selectedExam);
 
   const STEPS = ['Select Exam', 'Upload Pages', 'Review', 'Submit'];
   const stepIndex =
-    { 'select-exam': 0, upload: 1, review: 2, confirm: 3, submitted: 3 }[step] ?? 0;
+    { 'select-exam': 0, upload: 1, review: 2, confirm: 3, submitted: 3 }[step] ??
+    0;
 
   async function handleFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
@@ -78,8 +89,6 @@ export default function SubmitExamPage() {
 
         const pageNumber = pages.length + newPages.length + 1;
         const tempId = `page-${Date.now()}-${i}`;
-
-        // Local preview first (real file — never demo URL)
         const localUrl = URL.createObjectURL(file);
 
         let publicUrl = localUrl;
@@ -89,13 +98,11 @@ export default function SubmitExamPage() {
             `pending-${currentUser!.id}`,
             pageNumber
           );
-          // Prefer storage URL; revoke blob
           if (publicUrl && publicUrl !== localUrl) {
             URL.revokeObjectURL(localUrl);
           }
         } catch (uploadErr) {
           console.warn('Storage upload failed, keeping local preview', uploadErr);
-          // Keep blob URL so user still sees THEIR file
           publicUrl = localUrl;
           showToast(
             'Cloud upload failed for one page — preview is local only',
@@ -103,7 +110,6 @@ export default function SubmitExamPage() {
           );
         }
 
-        // Guard: never accept unsplash / stock
         if (
           publicUrl.includes('unsplash.com') ||
           publicUrl.includes('placeholder')
@@ -257,29 +263,39 @@ export default function SubmitExamPage() {
             </Card>
           ) : (
             <div className="space-y-3">
-              {availableExams.map((exam) => (
-                <button
-                  key={exam.id}
-                  type="button"
-                  onClick={() => {
-                    setSelectedExamId(exam.id);
-                    setStep('upload');
-                  }}
-                  className="w-full text-left rounded-xl border border-slate-200 bg-white px-5 py-4 hover:border-navy-400 hover:shadow-sm transition-all group"
-                >
-                  <div className="flex items-start justify-between">
-                    <div>
-                      <p className="font-medium text-slate-900">{exam.title}</p>
-                      <p className="text-sm text-slate-500 mt-0.5">
-                        {exam.code} · {exam.subject} · {exam.facultyName}
-                      </p>
+              {availableExams.map((exam) => {
+                const examQp = getQuestionPaperUrl(exam);
+                return (
+                  <button
+                    key={exam.id}
+                    type="button"
+                    onClick={() => {
+                      setSelectedExamId(exam.id);
+                      setStep('upload');
+                    }}
+                    className="w-full text-left rounded-xl border border-slate-200 bg-white px-5 py-4 hover:border-navy-400 hover:shadow-sm transition-all group"
+                  >
+                    <div className="flex items-start justify-between">
+                      <div>
+                        <p className="font-medium text-slate-900">
+                          {exam.title}
+                        </p>
+                        <p className="text-sm text-slate-500 mt-0.5">
+                          {exam.code} · {exam.subject} · {exam.facultyName}
+                        </p>
+                        {examQp && (
+                          <p className="text-xs text-emerald-600 mt-1">
+                            Question paper available
+                          </p>
+                        )}
+                      </div>
+                      <span className="text-slate-400 group-hover:text-navy-600">
+                        →
+                      </span>
                     </div>
-                    <span className="text-slate-400 group-hover:text-navy-600">
-                      →
-                    </span>
-                  </div>
-                </button>
-              ))}
+                  </button>
+                );
+              })}
             </div>
           )}
           <Button
@@ -294,7 +310,7 @@ export default function SubmitExamPage() {
 
       {step === 'upload' && selectedExam && (
         <div className="max-w-2xl">
-          <div className="px-4 py-3 bg-navy-50 border border-navy-200 rounded-xl mb-5 flex items-center gap-3">
+          <div className="px-4 py-3 bg-navy-50 border border-navy-200 rounded-xl mb-4 flex items-center gap-3">
             <div className="text-navy-600 text-lg">◉</div>
             <div>
               <p className="font-medium text-navy-900 text-sm">
@@ -305,6 +321,25 @@ export default function SubmitExamPage() {
               </p>
             </div>
           </div>
+
+          {qpUrl && (
+            <div className="mb-5 p-4 rounded-xl border border-emerald-200 bg-emerald-50">
+              <p className="text-sm font-semibold text-emerald-900 mb-1">
+                Question Paper
+              </p>
+              <p className="text-xs text-slate-600 mb-2">
+                Faculty uploaded QP — open while writing answers
+              </p>
+              <a
+                href={qpUrl}
+                target="_blank"
+                rel="noreferrer"
+                className="inline-flex text-sm font-medium text-navy-700 underline"
+              >
+                Open / Download Question Paper →
+              </a>
+            </div>
+          )}
 
           <div className="mb-5">
             <p className="text-sm font-medium text-slate-700 mb-2">
