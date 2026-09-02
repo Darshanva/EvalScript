@@ -220,10 +220,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
       const others = state.calibrations.filter(
         (c) => c.studentId !== action.calibration.studentId
       );
-      return {
-        ...state,
-        calibrations: [action.calibration, ...others],
-      };
+      return { ...state, calibrations: [action.calibration, ...others] };
     }
     case 'UPDATE_CALIBRATION':
       return {
@@ -354,35 +351,49 @@ function facultyExamIds(exams: Exam[], user: User): Set<string> {
 }
 
 async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
-  const [subs, evals, exams, logs, rubrics, calibrations] = await Promise.all([
-    fetchSubmissions(),
-    fetchEvaluations(),
-    ensureExamsSeeded(),
-    fetchAuditLogs(),
-    fetchRubrics(),
-    fetchCalibrations(),
-  ]);
-
-  let users: User[] = [];
   try {
-    const { data } = await supabase.from('profiles').select('*').order('name');
-    users = (data || []).map(mapProfileRow);
-  } catch (e) {
-    console.warn('profiles load failed', e);
-  }
+    const [subs, evals, exams, logs, rubrics, calibrations] = await Promise.all([
+      fetchSubmissions(),
+      fetchEvaluations(),
+      ensureExamsSeeded(),
+      fetchAuditLogs(),
+      fetchRubrics(),
+      fetchCalibrations(),
+    ]);
 
-  dispatch({
-    type: 'SET_DATA',
-    payload: {
-      submissions: subs,
-      evaluations: evals,
-      exams,
-      users,
-      auditLogs: logs,
-      rubrics,
-      calibrations,
-    },
-  });
+    let users: User[] = [];
+    try {
+      const { data } = await supabase.from('profiles').select('*').order('name');
+      users = (data || []).map(mapProfileRow);
+    } catch (e) {
+      console.warn('profiles load failed', e);
+    }
+
+    console.log(
+      '[cloud] loaded',
+      subs.length,
+      'subs,',
+      evals.length,
+      'evals,',
+      exams.length,
+      'exams'
+    );
+
+    dispatch({
+      type: 'SET_DATA',
+      payload: {
+        submissions: subs,
+        evaluations: evals,
+        exams,
+        users,
+        auditLogs: logs,
+        rubrics,
+        calibrations,
+      },
+    });
+  } catch (e) {
+    console.error('loadCloudData failed', e);
+  }
 }
 
 export function AppProvider({ children }: { children: ReactNode }) {
@@ -394,7 +405,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
     async function init() {
       dispatch({ type: 'SET_AUTH_LOADING', loading: true });
 
-      // Claude config from cloud — MUST be inside AppProvider (dispatch exists)
       try {
         const claudeCfg = await loadClaudeConfigFromCloud();
         if (
@@ -485,7 +495,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const showToast = useCallback(
     (message: string, type: 'success' | 'error' | 'info' = 'info') => {
       dispatch({ type: 'SHOW_TOAST', message, toastType: type });
-      setTimeout(() => dispatch({ type: 'CLEAR_TOAST' }), 4000);
+      setTimeout(() => dispatch({ type: 'CLEAR_TOAST' }), 4500);
     },
     []
   );
@@ -599,12 +609,15 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
           evaluation = {
             ...evaluation,
+            id: evaluation.id || `eval-${Date.now()}`,
             examId: submission.examId,
             submissionId: submission.id,
             studentId: submission.studentId,
             studentName: submission.studentName,
             examTitle: evaluation.examTitle || exam.title,
-            status: evaluation.status || 'AI_COMPLETE',
+            examCode: exam.code,
+            status: 'AI_COMPLETE',
+            aiGeneratedAt: evaluation.aiGeneratedAt || new Date().toISOString(),
           };
 
           dispatch({ type: 'ADD_EVALUATION', evaluation });
@@ -619,15 +632,27 @@ export function AppProvider({ children }: { children: ReactNode }) {
             evaluationId: evaluation.id,
           });
 
-          try {
-            await saveEvaluation(evaluation);
-            await updateSubmissionStatus(
-              submissionId,
-              'AI_COMPLETE',
-              evaluation.id
-            );
-          } catch (e) {
-            console.error('save evaluation failed', e);
+          const ok = await saveEvaluation(evaluation);
+          await updateSubmissionStatus(
+            submissionId,
+            'AI_COMPLETE',
+            evaluation.id
+          );
+
+          if (!ok) {
+            dispatch({
+              type: 'SHOW_TOAST',
+              message:
+                'AI done but cloud save failed — check evaluations table / RLS',
+              toastType: 'error',
+            });
+            console.error('saveEvaluation returned false', evaluation.id);
+          } else {
+            dispatch({
+              type: 'SHOW_TOAST',
+              message: `AI complete: ${evaluation.studentName} ${evaluation.totalMarks}/${evaluation.maxMarks}`,
+              toastType: 'success',
+            });
           }
 
           if (state.currentUser) {
@@ -641,7 +666,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
               details: `AI scored ${evaluation.totalMarks}/${evaluation.maxMarks} for ${evaluation.studentName}.`,
             });
           }
-        } catch (e) {
+        } catch (e: any) {
           console.error('processEvaluation failed', e);
           dispatch({
             type: 'UPDATE_SUBMISSION_STATUS',
@@ -651,7 +676,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
           updateSubmissionStatus(submissionId, 'SUBMITTED').catch(console.error);
           dispatch({
             type: 'SHOW_TOAST',
-            message: 'AI evaluation failed — submission kept in queue',
+            message: e?.message || 'AI evaluation failed',
             toastType: 'error',
           });
         }
@@ -670,10 +695,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
   const updateEvaluation = useCallback(async (evaluation: Evaluation) => {
     dispatch({ type: 'UPDATE_EVALUATION', evaluation });
-    try {
-      await saveEvaluation(evaluation);
-    } catch (e) {
-      console.error(e);
+    const ok = await saveEvaluation(evaluation);
+    if (!ok) {
+      dispatch({
+        type: 'SHOW_TOAST',
+        message: 'Could not save evaluation to cloud',
+        toastType: 'error',
+      });
     }
   }, []);
 
@@ -697,11 +725,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         submissionId: evaluation.submissionId,
         status: 'PUBLISHED',
       });
-      try {
-        await saveEvaluation(updatedEval);
-        await updateSubmissionStatus(evaluation.submissionId, 'PUBLISHED');
-      } catch (e) {
-        console.error(e);
+      const ok = await saveEvaluation(updatedEval);
+      await updateSubmissionStatus(evaluation.submissionId, 'PUBLISHED');
+      if (!ok) {
+        dispatch({
+          type: 'SHOW_TOAST',
+          message: 'Publish local only — cloud save failed',
+          toastType: 'error',
+        });
       }
       addAuditLog({
         userId: state.currentUser.id,
@@ -788,7 +819,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const updateSystemSettings = useCallback((settings: SystemSettings) => {
     dispatch({ type: 'UPDATE_SYSTEM_SETTINGS', settings });
     try {
-      localStorage.setItem('evalscript_system_settings', JSON.stringify(settings));
+      localStorage.setItem(
+        'evalscript_system_settings',
+        JSON.stringify(settings)
+      );
     } catch {
       /* ignore */
     }
@@ -797,15 +831,12 @@ export function AppProvider({ children }: { children: ReactNode }) {
   const getExamsForCurrentUser = useCallback((): Exam[] => {
     const u = state.currentUser;
     if (!u) return [];
-
     if (u.role === 'admin') return state.exams;
-
     if (u.role === 'faculty') {
       return state.exams.filter(
         (e) => e.facultyId === u.id || e.facultyName === u.name
       );
     }
-
     if (u.role === 'hod') {
       const c = (u.client || u.organisation || '').toLowerCase();
       if (!c) return state.exams;
@@ -813,47 +844,24 @@ export function AppProvider({ children }: { children: ReactNode }) {
         `${e.description || ''} ${e.title || ''}`.toLowerCase().includes(c)
       );
     }
-
     if (u.role === 'student') {
       const section = (u.section || '').toLowerCase().trim();
       const batch = (u.batch || '').toLowerCase().trim();
       const org = (u.organisation || u.client || '').toLowerCase().trim();
-
       return state.exams.filter((exam) => {
         const status = (exam.status || 'ACTIVE').toUpperCase();
         if (status !== 'ACTIVE' && status !== 'OPEN') return false;
-
-        if (exam.studentIds?.length && exam.studentIds.includes(u.id)) {
-          return true;
-        }
-
+        if (exam.studentIds?.length && exam.studentIds.includes(u.id)) return true;
         const hay =
           `${exam.description || ''} ${exam.title || ''} ${exam.code || ''}`.toLowerCase();
-
         if (section && hay.includes(`[section:${section}]`)) return true;
-        if (
-          batch &&
-          hay.includes(`[batch:${batch}]`) &&
-          section &&
-          hay.includes(section)
-        )
-          return true;
-        if (
-          section &&
-          (hay.includes(section) || hay.includes(`section ${section}`))
-        ) {
-          if (batch && hay.includes('batch') && !hay.includes(batch)) {
-            return hay.includes(section);
-          }
-          return true;
-        }
+        if (section && hay.includes(section)) return true;
         if (!section && batch && hay.includes(batch)) return true;
         if (!section && !batch && org && hay.includes(org)) return true;
         if (!section && !batch && !org) return true;
         return false;
       });
     }
-
     return [];
   }, [state.currentUser, state.exams]);
 
@@ -866,10 +874,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     if (state.currentUser.role === 'faculty') {
       const ids = facultyExamIds(state.exams, state.currentUser);
+      if (ids.size === 0) return state.submissions;
       return state.submissions.filter((s) => ids.has(s.examId));
-    }
-    if (state.currentUser.role === 'admin') {
-      return state.submissions;
     }
     return state.submissions;
   }, [state.currentUser, state.exams, state.submissions]);
@@ -884,22 +890,33 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
     if (state.currentUser.role === 'faculty') {
       const ids = facultyExamIds(state.exams, state.currentUser);
-      return state.evaluations.filter((e) => ids.has(e.examId));
+      const mySubIds = new Set(
+        state.submissions
+          .filter((s) => ids.has(s.examId) || ids.size === 0)
+          .map((s) => s.id)
+      );
+      return state.evaluations.filter(
+        (e) =>
+          ids.has(e.examId) ||
+          (e.submissionId && mySubIds.has(e.submissionId)) ||
+          ids.size === 0
+      );
     }
     return state.evaluations;
-  }, [state.currentUser, state.exams, state.evaluations]);
+  }, [
+    state.currentUser,
+    state.exams,
+    state.evaluations,
+    state.submissions,
+  ]);
 
   const getPendingReviewsForFaculty = useCallback((): Evaluation[] => {
-    if (!state.currentUser || state.currentUser.role !== 'faculty') return [];
-    const ids = facultyExamIds(state.exams, state.currentUser);
-    return state.evaluations.filter(
-      (e) =>
-        ids.has(e.examId) &&
-        (e.status === 'AI_COMPLETE' ||
-          e.status === 'FACULTY_REVIEW' ||
-          e.status === 'REVIEWED')
+    return getEvaluationsForCurrentUser().filter((e) =>
+      ['AI_COMPLETE', 'FACULTY_REVIEW', 'REVIEWED'].includes(
+        (e.status || '').toUpperCase()
+      )
     );
-  }, [state.currentUser, state.exams, state.evaluations]);
+  }, [getEvaluationsForCurrentUser]);
 
   const getCalibrationForStudent = useCallback(
     (studentId: string) =>

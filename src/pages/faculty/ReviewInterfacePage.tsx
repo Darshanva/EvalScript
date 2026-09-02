@@ -1,4 +1,5 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useLocation } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import {
   Button,
@@ -13,8 +14,7 @@ import {
   ScoreBar,
   ProgressBar,
 } from '../../components/ui';
-import { PageContainer } from '../../components/Layout';
-import type { Evaluation, EvaluationQuestion } from '../../types';
+import type { Evaluation } from '../../types';
 import { validateFacultyMarks } from '../../lib/marks-validator';
 
 type ZoomLevel = 0.5 | 0.75 | 1 | 1.25 | 1.5;
@@ -24,9 +24,37 @@ function pct(n: number, d: number) {
 }
 
 export default function ReviewInterfacePage() {
-  const { state, navigate, updateEvaluation, publishEvaluation, showToast } = useApp();
-  const { navCtx, evaluations, submissions } = state;
-  const evalId = navCtx.selectedEvaluationId;
+  const location = useLocation();
+  const {
+    state,
+    navigate,
+    updateEvaluation,
+    publishEvaluation,
+    showToast,
+    reloadCloudData,
+  } = useApp();
+  const { navCtx, evaluations, submissions, authLoading } = state;
+
+  // ID from navCtx OR router location.state (survives better)
+  const locState = (location.state || {}) as { selectedEvaluationId?: string };
+  const evalId =
+    navCtx?.selectedEvaluationId ||
+    locState.selectedEvaluationId ||
+    sessionStorage.getItem('reviewEvalId') ||
+    '';
+
+  useEffect(() => {
+    if (evalId) sessionStorage.setItem('reviewEvalId', evalId);
+  }, [evalId]);
+
+  useEffect(() => {
+    reloadCloudData?.();
+  }, []);
+
+  const evaluationFromState = useMemo(() => {
+    if (!evalId) return null;
+    return evaluations.find((e) => e.id === evalId) ?? null;
+  }, [evalId, evaluations]);
 
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [selectedPage, setSelectedPage] = useState(0);
@@ -34,7 +62,9 @@ export default function ReviewInterfacePage() {
   const [zoom, setZoom] = useState<ZoomLevel>(1);
   const [rotation, setRotation] = useState(0);
   const [facultyMarks, setFacultyMarks] = useState<Record<string, number>>({});
-  const [facultyFeedback, setFacultyFeedback] = useState<Record<string, string>>({});
+  const [facultyFeedback, setFacultyFeedback] = useState<Record<string, string>>(
+    {}
+  );
   const [facultyNotes, setFacultyNotes] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -44,55 +74,108 @@ export default function ReviewInterfacePage() {
   const rightPanelRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const ev = evaluations.find((e) => e.id === evalId) ?? null;
+    const ev = evaluationFromState;
     setEvaluation(ev);
     if (ev) {
       const marks: Record<string, number> = {};
       const feedback: Record<string, string> = {};
-      ev.questions.forEach((q) => {
-        marks[q.id] = q.facultyAwarded ?? q.totalAwarded;
-        feedback[q.id] = q.facultyFeedback ?? q.feedback;
+      (ev.questions || []).forEach((q) => {
+        marks[q.id] = q.facultyAwarded ?? q.totalAwarded ?? 0;
+        feedback[q.id] = q.facultyFeedback ?? q.feedback ?? '';
       });
       setFacultyMarks(marks);
       setFacultyFeedback(feedback);
       setFacultyNotes(ev.facultyNotes ?? '');
+      setSelectedPage(0);
+      setSelectedQuestion(0);
     }
-  }, [evalId, evaluations]);
+  }, [evaluationFromState]);
+
+  if (authLoading) {
+    return (
+      <div className="flex items-center justify-center h-screen bg-slate-50">
+        <Spinner size="lg" />
+      </div>
+    );
+  }
+
+  if (!evalId) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen gap-3 bg-slate-50">
+        <p className="text-slate-600 text-sm">No evaluation selected.</p>
+        <Button onClick={() => navigate('f-reviews')}>← Back to list</Button>
+      </div>
+    );
+  }
 
   if (!evaluation) {
     return (
-      <div className="flex items-center justify-center h-full py-32">
-        <div className="text-center">
-          <Spinner size="lg" />
-          <p className="text-slate-500 mt-3 text-sm">Loading evaluation…</p>
-        </div>
+      <div className="flex flex-col items-center justify-center h-screen gap-3 bg-slate-50">
+        <Spinner size="lg" />
+        <p className="text-slate-500 text-sm">Loading evaluation…</p>
+        <p className="text-xs text-slate-400">ID: {evalId}</p>
+        <Button variant="secondary" onClick={() => reloadCloudData?.()}>
+          Reload from cloud
+        </Button>
+        <Button variant="ghost" onClick={() => navigate('f-reviews')}>
+          ← Back
+        </Button>
       </div>
     );
   }
 
   const submission = submissions.find((s) => s.id === evaluation.submissionId);
   const pages = submission?.pages ?? [];
-  const currentQuestion = evaluation.questions[selectedQuestion];
-  const isPublished = evaluation.status === 'PUBLISHED';
+  const questions = evaluation.questions?.length
+    ? evaluation.questions
+    : [
+        {
+          id: 'q-fallback',
+          questionNumber: 1,
+          maxMarks: evaluation.maxMarks || 100,
+          totalAwarded: evaluation.totalMarks || 0,
+          facultyAwarded: evaluation.facultyTotalMarks,
+          confidence: evaluation.overallConfidence || 0.7,
+          confidenceLevel: evaluation.overallConfidenceLevel || 'MEDIUM',
+          flags: evaluation.flags || [],
+          studentAnswer: evaluation.transcription || '—',
+          answerSummary: '',
+          feedback: evaluation.facultyNotes || '',
+          facultyFeedback: '',
+          criteriaScores: [
+            {
+              criterionId: 'c1',
+              criterion: 'Overall',
+              awarded: evaluation.totalMarks || 0,
+              max: evaluation.maxMarks || 100,
+            },
+          ],
+        },
+      ];
+  const currentQuestion = questions[selectedQuestion] || questions[0];
+  const isPublished = (evaluation.status || '').toUpperCase() === 'PUBLISHED';
 
-  const totalFacultyMarks = evaluation.questions.reduce(
-    (sum, q) => sum + (facultyMarks[q.id] ?? q.totalAwarded),
+  const totalFacultyMarks = questions.reduce(
+    (sum, q) => sum + (facultyMarks[q.id] ?? q.totalAwarded ?? 0),
     0
   );
 
   function handleMarkChange(qId: string, value: string) {
     const num = parseFloat(value);
-    const question = evaluation!.questions.find((q) => q.id === qId);
+    const question = questions.find((q) => q.id === qId);
     if (!question) return;
-    const err = validateFacultyMarks(num, question.maxMarks, `Q${question.questionNumber}`);
+    const err = validateFacultyMarks(
+      num,
+      question.maxMarks,
+      `Q${question.questionNumber}`
+    );
     setErrors((prev) => ({ ...prev, [qId]: err ?? '' }));
     setFacultyMarks((prev) => ({ ...prev, [qId]: isNaN(num) ? 0 : num }));
   }
 
   async function handleSaveDraft() {
     setSaving(true);
-    const hasErrors = Object.values(errors).some(Boolean);
-    if (hasErrors) {
+    if (Object.values(errors).some(Boolean)) {
       showToast('Please fix mark errors before saving.', 'error');
       setSaving(false);
       return;
@@ -100,31 +183,29 @@ export default function ReviewInterfacePage() {
 
     const updatedEval: Evaluation = {
       ...evaluation!,
-      status: 'FACULTY_REVIEW',
+      status: 'REVIEWED',
       facultyTotalMarks: totalFacultyMarks,
       facultyNotes,
       facultyReviewedAt: new Date().toISOString(),
       facultyId: state.currentUser?.id ?? '',
       facultyName: state.currentUser?.name ?? '',
-      questions: evaluation!.questions.map((q) => ({
+      questions: questions.map((q) => ({
         ...q,
         facultyAwarded: facultyMarks[q.id] ?? q.totalAwarded,
         facultyFeedback: facultyFeedback[q.id] ?? q.feedback,
       })),
     };
 
-    await new Promise((r) => setTimeout(r, 600));
     updateEvaluation(updatedEval);
-    setEvaluation(updatedEval as Evaluation);
-    showToast('Draft saved successfully.', 'success');
+    setEvaluation(updatedEval);
+    showToast('Review saved — moved to Reviewed.', 'success');
     setSaving(false);
   }
 
   async function handlePublish() {
     if (!evaluation) return;
     setPublishing(true);
-    const hasErrors = Object.values(errors).some(Boolean);
-    if (hasErrors) {
+    if (Object.values(errors).some(Boolean)) {
       showToast('Please fix all mark errors before publishing.', 'error');
       setPublishing(false);
       return;
@@ -139,17 +220,16 @@ export default function ReviewInterfacePage() {
       publishedAt: new Date().toISOString(),
       facultyId: state.currentUser?.id ?? '',
       facultyName: state.currentUser?.name ?? '',
-      questions: evaluation.questions.map((q) => ({
+      questions: questions.map((q) => ({
         ...q,
         facultyAwarded: facultyMarks[q.id] ?? q.totalAwarded,
         facultyFeedback: facultyFeedback[q.id] ?? q.feedback,
       })),
     };
 
-    await new Promise((r) => setTimeout(r, 800));
     updateEvaluation(updatedEval);
     publishEvaluation(evaluation.id, facultyNotes);
-    setEvaluation(updatedEval as Evaluation);
+    setEvaluation(updatedEval);
     setPublishing(false);
     setPublishModal(false);
     showToast(`Result published for ${evaluation.studentName}.`, 'success');
@@ -160,9 +240,9 @@ export default function ReviewInterfacePage() {
 
   return (
     <div className="h-screen flex flex-col bg-slate-100 overflow-hidden">
-      {/* Header */}
       <header className="h-14 bg-white border-b border-slate-200 flex items-center px-4 gap-3 shrink-0 z-10">
         <button
+          type="button"
           onClick={() => navigate('f-reviews')}
           className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-800 mr-2"
         >
@@ -171,20 +251,36 @@ export default function ReviewInterfacePage() {
         <div className="h-5 w-px bg-slate-200" />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-semibold text-slate-900 text-sm">{evaluation.studentName}</span>
+            <span className="font-semibold text-slate-900 text-sm">
+              {evaluation.studentName}
+            </span>
             <span className="text-slate-400 text-sm">·</span>
-            <span className="text-sm text-slate-600 truncate">{evaluation.examTitle}</span>
+            <span className="text-sm text-slate-600 truncate">
+              {evaluation.examTitle}
+            </span>
             <StatusBadge status={evaluation.status} />
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <ConfidenceBadge level={evaluation.overallConfidenceLevel} score={evaluation.overallConfidence} />
+          <ConfidenceBadge
+            level={evaluation.overallConfidenceLevel}
+            score={evaluation.overallConfidence}
+          />
           {!isPublished && (
             <>
-              <Button size="sm" variant="secondary" loading={saving} onClick={handleSaveDraft}>
-                Save Draft
+              <Button
+                size="sm"
+                variant="secondary"
+                loading={saving}
+                onClick={handleSaveDraft}
+              >
+                Save Review
               </Button>
-              <Button size="sm" variant="gold" onClick={() => setPublishModal(true)}>
+              <Button
+                size="sm"
+                variant="gold"
+                onClick={() => setPublishModal(true)}
+              >
                 Approve &amp; Publish
               </Button>
             </>
@@ -193,21 +289,22 @@ export default function ReviewInterfacePage() {
         </div>
       </header>
 
-      {/* Main layout */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left: Image viewer */}
-        <div className="flex flex-col bg-slate-800 border-r border-slate-700" style={{ width: '45%', minWidth: 320 }}>
-          {/* Toolbar */}
+        {/* Pages */}
+        <div
+          className="flex flex-col bg-slate-800 border-r border-slate-700"
+          style={{ width: '45%', minWidth: 280 }}
+        >
           <div className="flex items-center gap-2 px-3 py-2 bg-slate-900 border-b border-slate-700">
             <span className="text-slate-400 text-xs font-medium">
-              Page {selectedPage + 1} / {pages.length}
+              Page {pages.length ? selectedPage + 1 : 0} / {pages.length}
             </span>
             <div className="flex-1" />
-            {/* Zoom */}
             <button
+              type="button"
               onClick={() => setZoom(ZOOM_LEVELS[Math.max(0, zoomIdx - 1)])}
               disabled={zoomIdx === 0}
-              className="w-7 h-7 flex items-center justify-center rounded bg-slate-700 text-white text-sm disabled:opacity-30 hover:bg-slate-600"
+              className="w-7 h-7 flex items-center justify-center rounded bg-slate-700 text-white text-sm disabled:opacity-30"
             >
               −
             </button>
@@ -215,215 +312,213 @@ export default function ReviewInterfacePage() {
               {Math.round(zoom * 100)}%
             </span>
             <button
-              onClick={() => setZoom(ZOOM_LEVELS[Math.min(ZOOM_LEVELS.length - 1, zoomIdx + 1)])}
+              type="button"
+              onClick={() =>
+                setZoom(
+                  ZOOM_LEVELS[Math.min(ZOOM_LEVELS.length - 1, zoomIdx + 1)]
+                )
+              }
               disabled={zoomIdx === ZOOM_LEVELS.length - 1}
-              className="w-7 h-7 flex items-center justify-center rounded bg-slate-700 text-white text-sm disabled:opacity-30 hover:bg-slate-600"
+              className="w-7 h-7 flex items-center justify-center rounded bg-slate-700 text-white text-sm disabled:opacity-30"
             >
               +
             </button>
-            <div className="w-px h-4 bg-slate-700 mx-1" />
-            {/* Rotate */}
             <button
+              type="button"
               onClick={() => setRotation((r) => (r + 90) % 360)}
-              className="w-7 h-7 flex items-center justify-center rounded bg-slate-700 text-white text-sm hover:bg-slate-600"
-              title="Rotate 90°"
+              className="w-7 h-7 flex items-center justify-center rounded bg-slate-700 text-white text-sm"
             >
               ↻
             </button>
             <button
+              type="button"
               onClick={() => setShowTranscription(!showTranscription)}
-              className={`px-2 h-7 rounded text-xs font-medium transition-colors ${showTranscription ? 'bg-navy-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'}`}
+              className={`px-2 h-7 rounded text-xs ${
+                showTranscription
+                  ? 'bg-navy-600 text-white'
+                  : 'bg-slate-700 text-slate-300'
+              }`}
             >
-              Transcription
+              Text
             </button>
           </div>
 
-          {/* Image area */}
           <div className="flex-1 overflow-auto flex items-start justify-center p-4">
             {pages.length > 0 ? (
-              <div style={{ transform: `rotate(${rotation}deg) scale(${zoom})`, transformOrigin: 'top center', transition: 'transform 0.2s' }}>
+              <div
+                style={{
+                  transform: `rotate(${rotation}deg) scale(${zoom})`,
+                  transformOrigin: 'top center',
+                  transition: 'transform 0.2s',
+                }}
+              >
                 <img
                   src={pages[selectedPage]?.imageUrl}
                   alt={`Page ${selectedPage + 1}`}
                   className="rounded-lg shadow-xl max-w-full"
-                  style={{ minWidth: 280 }}
+                  style={{ minWidth: 240 }}
+                  onError={(e) => {
+                    (e.target as HTMLImageElement).style.opacity = '0.3';
+                  }}
                 />
               </div>
             ) : (
-              <div className="text-slate-500 text-sm text-center py-12">
-                No pages available
+              <div className="text-slate-400 text-sm text-center py-12 px-4">
+                No answer pages linked.
+                <br />
+                <span className="text-xs">
+                  Submission id: {evaluation.submissionId || '—'}
+                </span>
               </div>
             )}
           </div>
 
-          {/* Transcription panel */}
           {showTranscription && (
-            <div className="border-t border-slate-700 p-3 max-h-48 overflow-y-auto">
-              <p className="text-xs text-slate-400 font-medium mb-2">AI Transcription</p>
-              <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">
-                {evaluation.transcription}
+            <div className="border-t border-slate-700 p-3 max-h-40 overflow-y-auto">
+              <p className="text-xs text-slate-400 mb-1">AI Transcription</p>
+              <p className="text-xs text-slate-300 whitespace-pre-wrap">
+                {evaluation.transcription || '—'}
               </p>
             </div>
           )}
 
-          {/* Page thumbnails */}
-          <div className="border-t border-slate-700 px-3 py-2 flex gap-2 overflow-x-auto">
-            {pages.map((page, i) => (
+          {pages.length > 0 && (
+            <div className="border-t border-slate-700 px-3 py-2 flex gap-2 overflow-x-auto">
+              {pages.map((page, i) => (
+                <button
+                  key={page.id || i}
+                  type="button"
+                  onClick={() => setSelectedPage(i)}
+                  className={`shrink-0 rounded overflow-hidden border-2 ${
+                    i === selectedPage
+                      ? 'border-gold-400'
+                      : 'border-transparent opacity-60'
+                  }`}
+                >
+                  <img
+                    src={page.thumbnailUrl || page.imageUrl}
+                    alt={`p${i + 1}`}
+                    className="w-12 h-16 object-cover bg-slate-700"
+                  />
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Marks panel */}
+        <div className="flex-1 flex flex-col overflow-hidden bg-white">
+          <div className="flex items-center gap-1 px-4 py-2 border-b border-slate-200 overflow-x-auto shrink-0">
+            {questions.map((q, i) => (
               <button
-                key={page.id}
-                onClick={() => setSelectedPage(i)}
-                className={`shrink-0 rounded overflow-hidden border-2 transition-all ${i === selectedPage ? 'border-gold-400' : 'border-transparent opacity-60 hover:opacity-80'}`}
+                key={q.id}
+                type="button"
+                onClick={() => setSelectedQuestion(i)}
+                className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-medium ${
+                  i === selectedQuestion
+                    ? 'bg-navy-900 text-white'
+                    : 'bg-slate-100 text-slate-600'
+                }`}
               >
-                <img
-                  src={page.thumbnailUrl}
-                  alt={`Page ${i + 1}`}
-                  className="w-12 h-16 object-cover"
-                />
+                Q{q.questionNumber}{' '}
+                <span className="font-mono opacity-80">
+                  {facultyMarks[q.id] ?? q.totalAwarded}/{q.maxMarks}
+                </span>
               </button>
             ))}
           </div>
-        </div>
 
-        {/* Right: Evaluation panel */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Question nav */}
-          <div className="flex items-center gap-1 px-4 py-2 bg-white border-b border-slate-200 overflow-x-auto shrink-0">
-            {evaluation.questions.map((q, i) => {
-              const awarded = facultyMarks[q.id] ?? q.totalAwarded;
-              const hasFlag = q.flags.length > 0;
-              const hasError = !!errors[q.id];
-              return (
-                <button
-                  key={q.id}
-                  onClick={() => setSelectedQuestion(i)}
-                  className={`shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium transition-colors ${i === selectedQuestion ? 'bg-navy-900 text-white' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'} ${hasError ? 'ring-1 ring-red-400' : ''}`}
-                >
-                  Q{q.questionNumber}
-                  {hasFlag && <span className="text-amber-400">⚠</span>}
-                  <span className={`font-mono ${i === selectedQuestion ? 'text-white/80' : 'text-slate-400'}`}>
-                    {awarded}/{q.maxMarks}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          {/* Question detail */}
-          <div ref={rightPanelRef} className="flex-1 overflow-y-auto">
+          <div ref={rightPanelRef} className="flex-1 overflow-y-auto p-5 space-y-5">
             {currentQuestion && (
-              <div className="p-5 space-y-5">
-                {/* Question header */}
+              <>
                 <div className="flex items-start justify-between gap-4">
                   <div>
-                    <div className="flex items-center gap-2 flex-wrap mb-1">
-                      <span className="text-lg font-semibold text-slate-900">
-                        Question {currentQuestion.questionNumber}
-                      </span>
-                      <span className="font-mono text-sm text-slate-400">
-                        Max: {currentQuestion.maxMarks} marks
-                      </span>
-                    </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <ConfidenceBadge level={currentQuestion.confidenceLevel} score={currentQuestion.confidence} />
-                      {currentQuestion.flags.map((f) => (
+                    <p className="text-lg font-semibold text-slate-900">
+                      Question {currentQuestion.questionNumber}
+                    </p>
+                    <div className="flex gap-2 flex-wrap mt-1">
+                      <ConfidenceBadge
+                        level={currentQuestion.confidenceLevel}
+                        score={currentQuestion.confidence}
+                      />
+                      {(currentQuestion.flags || []).map((f) => (
                         <FlagBadge key={f} flag={f} />
                       ))}
                     </div>
                   </div>
-                  <div className="text-right shrink-0">
-                    <p className={`text-3xl font-semibold font-mono ${pct(facultyMarks[currentQuestion.id] ?? currentQuestion.totalAwarded, currentQuestion.maxMarks) >= 75 ? 'text-emerald-600' : 'text-amber-600'}`}>
-                      {pct(facultyMarks[currentQuestion.id] ?? currentQuestion.totalAwarded, currentQuestion.maxMarks)}%
-                    </p>
-                  </div>
+                  <p className="text-2xl font-mono font-semibold text-navy-800">
+                    {pct(
+                      facultyMarks[currentQuestion.id] ??
+                        currentQuestion.totalAwarded,
+                      currentQuestion.maxMarks
+                    )}
+                    %
+                  </p>
                 </div>
 
-                {/* AI Transcription of this answer */}
-                <Card className="bg-slate-50 border-slate-200" padding={false}>
-                  <div className="px-4 py-3 border-b border-slate-200">
-                    <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide">
-                      AI Transcription — Student Answer
-                    </p>
-                  </div>
-                  <div className="px-4 py-3">
-                    <p className="text-sm text-slate-700 leading-relaxed">
-                      {currentQuestion.studentAnswer}
-                    </p>
-                    {currentQuestion.answerSummary && (
-                      <div className="mt-3 pt-3 border-t border-slate-200">
-                        <p className="text-xs text-slate-400 font-medium mb-1">AI Summary</p>
-                        <p className="text-xs text-slate-600 italic">{currentQuestion.answerSummary}</p>
-                      </div>
-                    )}
-                  </div>
+                <Card className="bg-slate-50">
+                  <p className="text-xs font-semibold text-slate-500 mb-2">
+                    Student answer (AI)
+                  </p>
+                  <p className="text-sm text-slate-700 whitespace-pre-wrap">
+                    {currentQuestion.studentAnswer || '—'}
+                  </p>
                 </Card>
 
-                {/* Criteria scoring */}
-                <Card>
-                  <h3 className="font-semibold text-slate-900 text-sm mb-4">Criterion Scoring</h3>
-                  <div className="space-y-4">
-                    {currentQuestion.criteriaScores.map((cs) => (
-                      <div key={cs.criterionId} className="pb-4 border-b border-slate-50 last:border-0 last:pb-0">
-                        <div className="flex items-start justify-between gap-3 mb-1.5">
-                          <p className="text-sm text-slate-700 flex-1">{cs.criterion}</p>
-                          <span className="text-xs text-slate-400 font-mono shrink-0">
-                            AI: {cs.awarded}/{cs.max}
-                          </span>
+                {(currentQuestion.criteriaScores || []).length > 0 && (
+                  <Card>
+                    <h3 className="font-semibold text-sm mb-3">Criteria</h3>
+                    <div className="space-y-3">
+                      {currentQuestion.criteriaScores.map((cs) => (
+                        <div key={cs.criterionId}>
+                          <div className="flex justify-between text-sm mb-1">
+                            <span>{cs.criterion}</span>
+                            <span className="font-mono text-slate-500">
+                              {cs.awarded}/{cs.max}
+                            </span>
+                          </div>
+                          <ScoreBar awarded={cs.awarded} max={cs.max} />
                         </div>
-                        <ScoreBar awarded={cs.awarded} max={cs.max} />
-                      </div>
-                    ))}
-                  </div>
-                </Card>
+                      ))}
+                    </div>
+                  </Card>
+                )}
 
-                {/* Faculty marks override */}
-                <Card className={`border-2 ${isPublished ? 'border-emerald-200 bg-emerald-50' : 'border-gold-200 bg-gold-50'}`}>
-                  <div className="flex items-center gap-2 mb-3">
-                    <div className={`w-1.5 h-1.5 rounded-full ${isPublished ? 'bg-emerald-400' : 'bg-gold-500'}`} />
-                    <h3 className="font-semibold text-sm text-slate-900">
-                      {isPublished ? 'Faculty-Approved Marks' : 'Faculty Mark Override'}
-                    </h3>
-                  </div>
-                  <div className="flex items-end gap-3 mb-1">
-                    <div className="flex items-center gap-2">
-                      <label className="text-xs text-slate-600 font-medium">Marks awarded</label>
-                      <div className="flex items-center gap-1">
-                        <input
-                          type="number"
-                          min="0"
-                          max={currentQuestion.maxMarks}
-                          step="0.5"
-                          value={facultyMarks[currentQuestion.id] ?? currentQuestion.totalAwarded}
-                          onChange={(e) => handleMarkChange(currentQuestion.id, e.target.value)}
-                          disabled={isPublished}
-                          className={`w-20 h-10 px-3 rounded-lg border text-center font-mono font-semibold text-lg focus:outline-none focus:ring-2 focus:ring-gold-500 ${errors[currentQuestion.id] ? 'border-red-400 bg-red-50' : 'border-gold-300 bg-white'} ${isPublished ? 'opacity-70' : ''}`}
-                        />
-                        <span className="text-slate-500 font-medium text-lg">/ {currentQuestion.maxMarks}</span>
-                      </div>
-                    </div>
-                    <div className="flex-1">
-                      <ProgressBar
-                        value={facultyMarks[currentQuestion.id] ?? currentQuestion.totalAwarded}
-                        max={currentQuestion.maxMarks}
-                        color={pct(facultyMarks[currentQuestion.id] ?? currentQuestion.totalAwarded, currentQuestion.maxMarks) >= 75 ? 'emerald' : 'amber'}
-                      />
-                    </div>
+                <Card className="border-2 border-gold-200 bg-gold-50">
+                  <p className="text-sm font-semibold mb-2">Faculty marks</p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="number"
+                      min={0}
+                      max={currentQuestion.maxMarks}
+                      step={0.5}
+                      disabled={isPublished}
+                      value={
+                        facultyMarks[currentQuestion.id] ??
+                        currentQuestion.totalAwarded
+                      }
+                      onChange={(e) =>
+                        handleMarkChange(currentQuestion.id, e.target.value)
+                      }
+                      className="w-20 h-10 px-2 rounded-lg border border-gold-300 text-center font-mono font-semibold"
+                    />
+                    <span>/ {currentQuestion.maxMarks}</span>
                   </div>
                   {errors[currentQuestion.id] && (
-                    <p className="text-xs text-red-600 mt-1">{errors[currentQuestion.id]}</p>
+                    <p className="text-xs text-red-600 mt-1">
+                      {errors[currentQuestion.id]}
+                    </p>
                   )}
                 </Card>
 
-                {/* AI Feedback */}
                 <Card>
-                  <h3 className="text-sm font-semibold text-slate-900 mb-3">Feedback</h3>
-                  <div className="mb-3 px-3 py-2.5 bg-slate-50 rounded-lg border border-slate-200">
-                    <p className="text-xs text-slate-400 font-medium mb-1">AI Suggested Feedback</p>
-                    <p className="text-sm text-slate-700">{currentQuestion.feedback}</p>
-                  </div>
-                  {!isPublished ? (
+                  <p className="text-xs text-slate-500 mb-1">AI feedback</p>
+                  <p className="text-sm text-slate-700 mb-3">
+                    {currentQuestion.feedback}
+                  </p>
+                  {!isPublished && (
                     <Textarea
-                      label="Faculty Feedback (optional)"
-                      placeholder="Add or modify feedback for the student…"
+                      label="Your feedback"
                       rows={3}
                       value={facultyFeedback[currentQuestion.id] ?? ''}
                       onChange={(e) =>
@@ -433,130 +528,84 @@ export default function ReviewInterfacePage() {
                         }))
                       }
                     />
-                  ) : (
-                    <div className="px-3 py-2.5 bg-emerald-50 border border-emerald-200 rounded-lg">
-                      <p className="text-xs text-emerald-600 font-medium mb-1">Published Feedback</p>
-                      <p className="text-sm text-slate-700">
-                        {facultyFeedback[currentQuestion.id] ?? currentQuestion.feedback}
-                      </p>
-                    </div>
                   )}
                 </Card>
-
-                {/* Navigation */}
-                <div className="flex items-center justify-between pt-1">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={selectedQuestion === 0}
-                    onClick={() => setSelectedQuestion((n) => n - 1)}
-                  >
-                    ← Previous
-                  </Button>
-                  <span className="text-xs text-slate-400">
-                    {selectedQuestion + 1} of {evaluation.questions.length}
-                  </span>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    disabled={selectedQuestion === evaluation.questions.length - 1}
-                    onClick={() => setSelectedQuestion((n) => n + 1)}
-                  >
-                    Next →
-                  </Button>
-                </div>
-              </div>
+              </>
             )}
           </div>
 
-          {/* Footer summary */}
-          <div className="border-t border-slate-200 bg-white px-5 py-3 shrink-0">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                <div>
-                  <p className="text-xs text-slate-400">AI Total</p>
-                  <p className="font-mono font-semibold text-slate-900">
-                    {evaluation.totalMarks}/{evaluation.maxMarks}
-                  </p>
-                </div>
-                <div className="w-px h-6 bg-slate-200" />
-                <div>
-                  <p className="text-xs text-slate-400">Faculty Total</p>
-                  <p className={`font-mono font-semibold ${totalFacultyMarks !== evaluation.totalMarks ? 'text-gold-700' : 'text-slate-900'}`}>
-                    {totalFacultyMarks}/{evaluation.maxMarks}
-                  </p>
-                </div>
-                <div>
-                  <p className="text-xs text-slate-400">Percentage</p>
-                  <p className="font-mono font-semibold text-slate-900">
-                    {pct(totalFacultyMarks, evaluation.maxMarks)}%
-                  </p>
-                </div>
+          <div className="border-t border-slate-200 px-5 py-3 flex items-center justify-between shrink-0">
+            <div className="flex gap-4 text-sm">
+              <div>
+                <p className="text-xs text-slate-400">AI</p>
+                <p className="font-mono font-semibold">
+                  {evaluation.totalMarks}/{evaluation.maxMarks}
+                </p>
               </div>
-              {!isPublished && (
-                <div className="flex items-center gap-2">
-                  <Button size="sm" variant="secondary" loading={saving} onClick={handleSaveDraft}>
-                    Save Draft
-                  </Button>
-                  <Button size="sm" variant="gold" onClick={() => setPublishModal(true)}>
-                    Publish Result
-                  </Button>
-                </div>
-              )}
+              <div>
+                <p className="text-xs text-slate-400">Faculty</p>
+                <p className="font-mono font-semibold">
+                  {totalFacultyMarks}/{evaluation.maxMarks}
+                </p>
+              </div>
             </div>
+            {!isPublished && (
+              <div className="flex gap-2">
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  loading={saving}
+                  onClick={handleSaveDraft}
+                >
+                  Save Review
+                </Button>
+                <Button
+                  size="sm"
+                  variant="gold"
+                  onClick={() => setPublishModal(true)}
+                >
+                  Publish
+                </Button>
+              </div>
+            )}
           </div>
         </div>
       </div>
 
-      {/* Publish confirmation modal */}
       <Modal
         open={publishModal}
         onClose={() => setPublishModal(false)}
-        title="Publish Evaluation Result"
+        title="Publish result"
       >
-        <div className="space-y-4">
-          <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg">
-            <p className="text-sm text-amber-800">
-              <span className="font-medium">Once published, the student can see this result.</span>{' '}
-              Ensure all marks are correct before proceeding.
-            </p>
-          </div>
-
-          <div className="grid grid-cols-3 gap-3">
-            <div className="bg-slate-50 rounded-lg p-3 text-center">
-              <p className="text-xs text-slate-400 mb-1">Student</p>
-              <p className="font-medium text-slate-800 text-sm">{evaluation.studentName}</p>
-            </div>
-            <div className="bg-slate-50 rounded-lg p-3 text-center">
-              <p className="text-xs text-slate-400 mb-1">Final Score</p>
-              <p className="font-mono font-semibold text-slate-900">
-                {totalFacultyMarks}/{evaluation.maxMarks}
-              </p>
-            </div>
-            <div className="bg-slate-50 rounded-lg p-3 text-center">
-              <p className="text-xs text-slate-400 mb-1">Percentage</p>
-              <p className="font-mono font-semibold text-slate-900">
-                {pct(totalFacultyMarks, evaluation.maxMarks)}%
-              </p>
-            </div>
-          </div>
-
-          <Textarea
-            label="Faculty notes (optional — visible to student)"
-            placeholder="Any overall comments or notes for the student…"
-            rows={3}
-            value={facultyNotes}
-            onChange={(e) => setFacultyNotes(e.target.value)}
-          />
-
-          <div className="flex gap-3">
-            <Button variant="secondary" className="flex-1" onClick={() => setPublishModal(false)}>
-              Cancel
-            </Button>
-            <Button variant="gold" className="flex-1" loading={publishing} onClick={handlePublish}>
-              Confirm &amp; Publish
-            </Button>
-          </div>
+        <p className="text-sm text-slate-600 mb-4">
+          Student <strong>{evaluation.studentName}</strong> will see{' '}
+          <strong>
+            {totalFacultyMarks}/{evaluation.maxMarks}
+          </strong>
+          .
+        </p>
+        <Textarea
+          label="Notes (optional)"
+          rows={2}
+          value={facultyNotes}
+          onChange={(e) => setFacultyNotes(e.target.value)}
+        />
+        <div className="flex gap-3 mt-4">
+          <Button
+            variant="secondary"
+            className="flex-1"
+            onClick={() => setPublishModal(false)}
+          >
+            Cancel
+          </Button>
+          <Button
+            variant="gold"
+            className="flex-1"
+            loading={publishing}
+            onClick={handlePublish}
+          >
+            Confirm publish
+          </Button>
         </div>
       </Modal>
     </div>
