@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useApp } from '../../context/AppContext';
 import { Button, Card, Badge, Spinner } from '../../components/ui';
@@ -8,32 +8,59 @@ import { runCalibrationAnalysis } from '../../lib/calibration-ai';
 import { CALIBRATION_PASSAGE } from '../../lib/seed-data';
 import type { CalibrationSample } from '../../types';
 
+const BUCKET = 'calibrations'; // your PUBLIC bucket
+
 function genId() {
   return `cal-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-async function uploadCalFile(file: File, studentId: string): Promise<string> {
-  const ext = file.name.split('.').pop() || 'jpg';
-  const path = `calibration/${studentId}/sample-${Date.now()}.${ext}`;
+function testImageLoads(url: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => resolve(true);
+    img.onerror = () => resolve(false);
+    img.src = url;
+    setTimeout(() => resolve(false), 8000);
+  });
+}
 
-  const { error } = await supabase.storage
-    .from('answer-scripts')
-    .upload(path, file, { upsert: true, contentType: file.type });
+async function uploadCalFile(
+  file: File,
+  studentId: string
+): Promise<string | null> {
+  const ext = (file.name.split('.').pop() || 'jpg').toLowerCase();
+  const path = `${studentId}/${Date.now()}.${ext}`;
+
+  const { error } = await supabase.storage.from(BUCKET).upload(path, file, {
+    upsert: true,
+    contentType: file.type || 'image/jpeg',
+  });
 
   if (error) {
-    console.warn('storage failed, blob URL', error);
-    return URL.createObjectURL(file);
+    console.error('calibration upload error', error);
+    return null;
   }
 
-  const { data } = supabase.storage.from('answer-scripts').getPublicUrl(path);
-  if (
-    !data.publicUrl ||
-    data.publicUrl.includes('unsplash') ||
-    data.publicUrl.includes('placeholder')
-  ) {
-    return URL.createObjectURL(file);
+  const { data } = supabase.storage.from(BUCKET).getPublicUrl(path);
+  const url = data?.publicUrl;
+  if (!url) return null;
+
+  const ok = await testImageLoads(url);
+  if (!ok) {
+    console.error('public URL did not load image', url);
+    return null;
   }
-  return data.publicUrl;
+  return url;
+}
+
+/** File → data URL for Claude when only blob exists */
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
 }
 
 export default function CalibrationPage() {
@@ -45,11 +72,11 @@ export default function CalibrationPage() {
     ? state.calibrations.find((c) => c.studentId === user.id)
     : undefined;
 
-  const [previewUrl, setPreviewUrl] = useState<string | null>(
-    existing?.imageUrl || existing?.imageUrls?.slow || null
-  );
+  const [displayUrl, setDisplayUrl] = useState<string | null>(null);
+  const [cloudUrl, setCloudUrl] = useState<string | null>(null);
   const [file, setFile] = useState<File | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [result, setResult] = useState<{
     qualityScore: number;
     feedback: string;
@@ -57,20 +84,55 @@ export default function CalibrationPage() {
     strengths: string[];
     improvements: string[];
     paceNotes: { slow: string; medium: string; fast: string };
-  } | null>(
-    existing?.qualityScore != null
-      ? {
-          qualityScore: existing.qualityScore,
-          feedback: existing.feedback || '',
-          transcription: existing.transcription || '',
-          strengths: existing.strengths || [],
-          improvements: existing.improvements || [],
-          paceNotes: { slow: '', medium: '', fast: '' },
-        }
-      : null
-  );
+  } | null>(null);
 
   const inputRef = useRef<HTMLInputElement>(null);
+  const blobRef = useRef<string | null>(null);
+
+  // Restore score + try cloud image (only if it loads)
+  useEffect(() => {
+    if (!user) return;
+    const cal = state.calibrations.find((c) => c.studentId === user.id);
+    if (!cal) return;
+
+    if (cal.qualityScore != null) {
+      setResult({
+        qualityScore: cal.qualityScore,
+        feedback: cal.feedback || '',
+        transcription: cal.transcription || '',
+        strengths: cal.strengths || [],
+        improvements: cal.improvements || [],
+        paceNotes: { slow: '', medium: '', fast: '' },
+      });
+    }
+
+    const raw = cal.imageUrl || cal.imageUrls?.slow;
+    if (!raw || raw.startsWith('blob:')) return;
+
+    let cancelled = false;
+    (async () => {
+      const ok = await testImageLoads(raw);
+      if (!cancelled && ok) {
+        setCloudUrl(raw);
+        setDisplayUrl(raw);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, state.calibrations]);
+
+  useEffect(() => {
+    return () => {
+      if (blobRef.current?.startsWith('blob:')) {
+        try {
+          URL.revokeObjectURL(blobRef.current);
+        } catch {
+          /* ignore */
+        }
+      }
+    };
+  }, []);
 
   if (!user) return null;
 
@@ -78,72 +140,88 @@ export default function CalibrationPage() {
     const f = list?.[0];
     if (!f) return;
     if (!f.type.startsWith('image/')) {
-      showToast('Image only', 'error');
+      showToast('Please choose an image file', 'error');
       return;
     }
 
-    if (previewUrl?.startsWith('blob:')) {
+    if (blobRef.current?.startsWith('blob:')) {
       try {
-        URL.revokeObjectURL(previewUrl);
+        URL.revokeObjectURL(blobRef.current);
       } catch {
         /* ignore */
       }
     }
 
     const local = URL.createObjectURL(f);
+    blobRef.current = local;
     setFile(f);
-    setPreviewUrl(local);
+    setDisplayUrl(local); // ALWAYS show local photo first
+    setCloudUrl(null);
     setResult(null);
+    setUploading(true);
 
     try {
       const publicUrl = await uploadCalFile(f, user!.id);
-      setPreviewUrl(publicUrl);
-      if (publicUrl !== local) {
-        try {
-          URL.revokeObjectURL(local);
-        } catch {
-          /* ignore */
-        }
+      if (publicUrl) {
+        setCloudUrl(publicUrl);
+        // Keep showing blob (reliable). Cloud URL saved for DB + AI.
+        showToast('Saved to cloud', 'success');
+      } else {
+        showToast(
+          'Cloud save failed — photo still visible locally. Check bucket name: calibrations',
+          'error'
+        );
       }
-    } catch {
-      /* keep local */
+    } finally {
+      setUploading(false);
     }
   }
 
   function clearSample() {
-    if (previewUrl?.startsWith('blob:')) {
+    if (blobRef.current?.startsWith('blob:')) {
       try {
-        URL.revokeObjectURL(previewUrl);
+        URL.revokeObjectURL(blobRef.current);
       } catch {
         /* ignore */
       }
     }
+    blobRef.current = null;
     setFile(null);
-    setPreviewUrl(null);
+    setDisplayUrl(null);
+    setCloudUrl(null);
     setResult(null);
     if (inputRef.current) inputRef.current.value = '';
   }
 
   async function runAnalysis() {
-    if (!previewUrl) {
+    if (!displayUrl && !file) {
       showToast('Upload your calibration page first', 'error');
       return;
     }
     setAnalyzing(true);
     try {
+      let imageForAi = cloudUrl || displayUrl!;
+
+      // Claude cannot fetch blob: — send data URL
+      if (imageForAi.startsWith('blob:') && file) {
+        imageForAi = await fileToDataUrl(file);
+      }
+
       const analysis = await runCalibrationAnalysis({
-        imageUrl: previewUrl,
+        imageUrl: imageForAi,
         studentName: user!.name,
       });
+
+      const savedUrl = cloudUrl || displayUrl!;
 
       const sample: CalibrationSample = {
         id: existing?.id || genId(),
         studentId: user!.id,
-        imageUrl: previewUrl,
+        imageUrl: savedUrl,
         imageUrls: {
-          slow: previewUrl,
-          medium: previewUrl,
-          fast: previewUrl,
+          slow: savedUrl,
+          medium: savedUrl,
+          fast: savedUrl,
         },
         qualityScore: analysis.qualityScore,
         feedback: analysis.feedback,
@@ -160,6 +238,7 @@ export default function CalibrationPage() {
         .update({ calibrated: true })
         .eq('id', user!.id);
 
+      // Never clear displayUrl
       setResult({
         qualityScore: analysis.qualityScore,
         feedback: analysis.feedback,
@@ -181,11 +260,10 @@ export default function CalibrationPage() {
     <PageContainer>
       <PageHeader
         title="Handwriting Calibration"
-        subtitle="Write slow, medium, and fast on ONE page under clear headings, then upload a photo."
+        subtitle="Write SLOW / MEDIUM / FAST on one page, then upload the photo."
         breadcrumb="Student Portal"
       />
 
-      {/* Reference + how to layout the page */}
       <Card className="mb-6 border-2 border-navy-200 bg-navy-50/40">
         <div className="flex items-start justify-between gap-3 mb-3">
           <div>
@@ -193,49 +271,45 @@ export default function CalibrationPage() {
               Reference — write this on paper
             </h3>
             <p className="text-xs text-navy-700 mt-1">
-              Use one plain sheet. Write the full passage three times with these
-              headings: <strong>SLOW</strong>, <strong>MEDIUM</strong>,{' '}
-              <strong>FAST</strong>. Then photograph the whole page.
+              One sheet · headings <strong>SLOW</strong>, <strong>MEDIUM</strong>
+              , <strong>FAST</strong>
             </p>
           </div>
           <Badge variant="navy">Sample</Badge>
         </div>
-
         <div className="rounded-xl bg-white border border-navy-100 p-4 sm:p-5 mb-4">
           <pre className="text-sm text-slate-800 whitespace-pre-wrap font-sans leading-relaxed">
             {CALIBRATION_PASSAGE}
           </pre>
         </div>
-
         <div className="rounded-xl bg-white border border-dashed border-navy-200 p-4 text-sm text-slate-700 space-y-2">
           <p className="font-medium text-slate-900">Page layout example</p>
           <p>
-            <strong>SLOW</strong> — copy the passage carefully and neatly
+            <strong>SLOW</strong> — carefully and neatly
           </p>
           <p>
-            <strong>MEDIUM</strong> — copy at your normal exam pace
+            <strong>MEDIUM</strong> — normal exam pace
           </p>
           <p>
-            <strong>FAST</strong> — copy quickly, as under time pressure
+            <strong>FAST</strong> — under time pressure
           </p>
         </div>
       </Card>
 
-      {/* Single upload */}
       <Card className="mb-6 max-w-xl">
         <h3 className="font-semibold text-slate-900 text-sm mb-1">
           Upload calibration page
         </h3>
         <p className="text-xs text-slate-500 mb-4">
-          One image only — your real photo, not a demo image.
+          Photo stays on screen after analyse. Cloud bucket: <code>{BUCKET}</code>
         </p>
 
-        {previewUrl ? (
-          <div className="relative rounded-xl overflow-hidden border border-slate-200 bg-white mb-4">
+        {displayUrl ? (
+          <div className="rounded-xl overflow-hidden border border-slate-200 bg-slate-100 mb-4">
             <img
-              src={previewUrl}
-              alt="Calibration sample"
-              className="w-full max-h-[420px] object-contain"
+              src={displayUrl}
+              alt="Calibration"
+              className="w-full max-h-[480px] object-contain block mx-auto"
             />
           </div>
         ) : (
@@ -245,7 +319,7 @@ export default function CalibrationPage() {
             className="w-full aspect-[4/3] mb-4 border-2 border-dashed border-slate-300 rounded-xl flex flex-col items-center justify-center text-slate-400 hover:border-navy-400 hover:bg-slate-50"
           >
             <span className="text-3xl mb-2">↑</span>
-            <span className="text-sm">Photo of your one page</span>
+            <span className="text-sm">Tap to take / choose photo</span>
           </button>
         )}
 
@@ -261,36 +335,51 @@ export default function CalibrationPage() {
         <div className="flex flex-wrap gap-2">
           <Button
             variant="secondary"
+            loading={uploading}
             onClick={() => inputRef.current?.click()}
           >
-            {previewUrl ? 'Replace photo' : 'Upload photo'}
+            {displayUrl ? 'Replace photo' : 'Upload photo'}
           </Button>
-          {previewUrl && (
+          {displayUrl && (
             <Button variant="ghost" className="text-red-600" onClick={clearSample}>
               Clear
             </Button>
           )}
           <Button
             loading={analyzing}
-            disabled={!previewUrl || analyzing}
+            disabled={!displayUrl || analyzing || uploading}
             onClick={runAnalysis}
           >
             {analyzing ? 'AI analysing…' : 'Analyse handwriting'}
           </Button>
         </div>
+        {cloudUrl && (
+          <p className="text-xs text-emerald-600 mt-2">✓ Stored in Supabase</p>
+        )}
       </Card>
 
       {analyzing && (
         <Card className="mb-6 flex items-center gap-3">
           <Spinner size="md" />
-          <p className="text-sm text-slate-600">
-            Transcribing page and scoring slow / medium / fast sections…
-          </p>
+          <p className="text-sm text-slate-600">Analysing handwriting…</p>
         </Card>
       )}
 
       {result && (
         <div className="space-y-4 max-w-3xl">
+          {displayUrl && (
+            <Card className="overflow-hidden p-0">
+              <p className="text-xs font-medium text-slate-500 px-4 pt-3">
+                Your uploaded page
+              </p>
+              <img
+                src={displayUrl}
+                alt="Uploaded page"
+                className="w-full max-h-[360px] object-contain bg-slate-50"
+              />
+            </Card>
+          )}
+
           <Card>
             <div className="flex items-center justify-between mb-3">
               <h3 className="font-semibold text-slate-900">Overall score</h3>
@@ -332,31 +421,6 @@ export default function CalibrationPage() {
               </ul>
             </Card>
           </div>
-
-          {(result.paceNotes.slow ||
-            result.paceNotes.medium ||
-            result.paceNotes.fast) && (
-            <Card>
-              <h4 className="font-semibold text-sm mb-2">By pace</h4>
-              <div className="space-y-2 text-sm text-slate-600">
-                {result.paceNotes.slow && (
-                  <p>
-                    <strong>Slow:</strong> {result.paceNotes.slow}
-                  </p>
-                )}
-                {result.paceNotes.medium && (
-                  <p>
-                    <strong>Medium:</strong> {result.paceNotes.medium}
-                  </p>
-                )}
-                {result.paceNotes.fast && (
-                  <p>
-                    <strong>Fast:</strong> {result.paceNotes.fast}
-                  </p>
-                )}
-              </div>
-            </Card>
-          )}
 
           {result.transcription && (
             <Card>
