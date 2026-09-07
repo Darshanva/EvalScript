@@ -26,6 +26,14 @@ function getQuestionPaperUrl(
   return m?.[1] || null;
 }
 
+function isBadImageUrl(url: string | undefined): boolean {
+  if (!url) return true;
+  if (url.startsWith('blob:')) return true;
+  if (url.includes('unsplash.com')) return true;
+  if (url.includes('placeholder')) return true;
+  return false;
+}
+
 export default function SubmitExamPage() {
   const routerNavigate = useNavigate();
   const {
@@ -105,15 +113,12 @@ export default function SubmitExamPage() {
           console.warn('Storage upload failed, keeping local preview', uploadErr);
           publicUrl = localUrl;
           showToast(
-            'Cloud upload failed for one page — preview is local only',
+            'Cloud upload failed for one page — re-upload before submit',
             'error'
           );
         }
 
-        if (
-          publicUrl.includes('unsplash.com') ||
-          publicUrl.includes('placeholder')
-        ) {
+        if (isBadImageUrl(publicUrl) && publicUrl !== localUrl) {
           publicUrl = localUrl;
         }
 
@@ -167,6 +172,16 @@ export default function SubmitExamPage() {
 
   async function handleSubmit() {
     if (!selectedExam || pages.length === 0) return;
+
+    const badPages = pages.filter((p) => isBadImageUrl(p.imageUrl));
+    if (badPages.length > 0) {
+      showToast(
+        `${badPages.length} page(s) are not on cloud storage. Remove and re-upload them before submit.`,
+        'error'
+      );
+      return;
+    }
+
     setSubmitting(true);
 
     try {
@@ -352,13 +367,22 @@ export default function SubmitExamPage() {
                 {pages.map((page) => (
                   <div
                     key={page.id}
-                    className="relative group rounded-lg overflow-hidden border border-slate-200 aspect-[3/4] bg-white"
+                    className={`relative group rounded-lg overflow-hidden border aspect-[3/4] bg-white ${
+                      isBadImageUrl(page.imageUrl)
+                        ? 'border-red-400 ring-1 ring-red-300'
+                        : 'border-slate-200'
+                    }`}
                   >
                     <img
                       src={page.imageUrl}
                       alt={page.fileName || `Page ${page.pageNumber}`}
                       className="w-full h-full object-contain"
                     />
+                    {isBadImageUrl(page.imageUrl) && (
+                      <div className="absolute top-0 inset-x-0 bg-red-600 text-white text-[10px] text-center py-0.5">
+                        Not on cloud
+                      </div>
+                    )}
                     <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex flex-col items-center justify-center gap-1">
                       <div className="flex gap-1">
                         <button
@@ -425,7 +449,7 @@ export default function SubmitExamPage() {
                   Drop image files here
                 </p>
                 <p className="text-xs text-slate-400 mt-0.5">
-                  or click · JPG, PNG — your file is shown, not a demo image
+                  or click · JPG, PNG — must upload to cloud before submit
                 </p>
               </div>
               <input
@@ -474,7 +498,11 @@ export default function SubmitExamPage() {
               {pages.map((page) => (
                 <div
                   key={page.id}
-                  className="relative rounded-lg overflow-hidden border border-slate-200 aspect-[3/4] bg-white"
+                  className={`relative rounded-lg overflow-hidden border aspect-[3/4] bg-white ${
+                    isBadImageUrl(page.imageUrl)
+                      ? 'border-red-400'
+                      : 'border-slate-200'
+                  }`}
                 >
                   <img
                     src={page.imageUrl}

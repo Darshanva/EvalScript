@@ -544,6 +544,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
         state.rubrics.find((r) => r.id === exam.rubricId);
 
       if (!rubric) {
+        console.warn(
+          '[AI] AUTO RUBRIC — no cloud rubric for exam',
+          exam.id,
+          exam.code,
+          'maxMarks',
+          exam.maxMarks
+        );
         rubric = {
           id: exam.rubricId || `rubric-auto-${exam.id}`,
           examId: exam.id,
@@ -576,10 +583,9 @@ export function AppProvider({ children }: { children: ReactNode }) {
       });
       updateSubmissionStatus(submissionId, 'PROCESSING').catch(console.error);
 
-      const calibration = state.calibrations.find(
-        (c) => c.studentId === submission.studentId
-      );
-
+      // Fair scoring: do NOT pass per-student calibration into grading.
+      // Same answer pages should get stable marks across students.
+      // Calibration remains available for handwriting practice UI only.
       const useClaude =
         state.systemSettings.aiMode === 'claude' ||
         state.systemSettings.aiProvider === 'claude' ||
@@ -595,8 +601,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
               rubric: rubric!,
               examTitle: `${exam.title} (${exam.code})`,
               studentName: submission.studentName || 'Student',
-              calibrationImageUrl:
-                calibration?.imageUrl || calibration?.imageUrls?.slow,
+              calibrationImageUrl: undefined,
             });
           } else {
             evaluation = runDemoEvaluation({
@@ -686,7 +691,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       state.submissions,
       state.exams,
       state.rubrics,
-      state.calibrations,
       state.systemSettings,
       state.currentUser,
       addAuditLog,
