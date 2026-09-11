@@ -66,34 +66,37 @@ async function loadAnswerImages(
     }
     const b64 = await urlToBase64(url);
     if (b64) {
-      out.push({ ...b64, label: `Answer page ${page.pageNumber ?? out.length + 1}` });
+      out.push({
+        ...b64,
+        label: `Answer page ${page.pageNumber ?? out.length + 1}`,
+      });
     }
   }
   return out.slice(0, 20);
 }
 
-/** Pass 1 — context transcription, NO calibration image */
 async function runPass1(
   answerImages: { mediaType: string; data: string; label: string }[],
   examTitle: string
-): Promise<{ full_transcription: string; flagged_uncertainties: FlaggedUncertainty[] }> {
+): Promise<{
+  full_transcription: string;
+  flagged_uncertainties: FlaggedUncertainty[];
+}> {
   const client = createClaudeClient();
   if (!client) throw new Error('Claude API key not configured');
 
-  const prompt = `You are transcribing a handwritten exam answer script. You will see ONLY the student's answer script image(s). Do not assume anything about handwriting style in advance.
+  const prompt = `You are transcribing a handwritten exam answer script. You see ONLY the answer page image(s). Do not assume handwriting style in advance.
 
-Exam context: ${examTitle} (banking/finance style answers possible).
+Exam context: ${examTitle}
 
 Instructions:
-1. Transcribe the full text using contextual understanding — vocabulary, grammar, sentence structure, and subject-matter logic to resolve unclear handwriting.
-2. Produce your best-confidence transcription of the entire script.
-3. Separately, list every word or short phrase where your confidence is genuinely low — i.e., you resolved it through guesswork rather than clear reading. For each flagged item, include:
-   - guess: the transcribed guess
-   - ambiguity_note: short description (e.g. "could be 'r' or 'v'")
-   - location: line number or surrounding words
-4. Do NOT flag words you are confident about, even if handwriting is messy — only flag genuine ambiguity where two or more readings seem plausible.
+1. Transcribe the full text using context (vocabulary, grammar, subject logic).
+2. Best-confidence full transcription.
+3. List ONLY genuine low-confidence words/phrases (two readings plausible). For each:
+   - guess, ambiguity_note, location
+4. Do NOT flag words you are confident about.
 
-Return ONLY valid JSON:
+Return ONLY JSON:
 {
   "full_transcription": "complete text",
   "flagged_uncertainties": [
@@ -131,7 +134,6 @@ Return ONLY valid JSON:
   };
 }
 
-/** Pass 2 — only flagged items + calibration sample */
 async function runPass2(
   answerImages: { mediaType: string; data: string; label: string }[],
   calibrationB64: { mediaType: string; data: string },
@@ -140,18 +142,18 @@ async function runPass2(
   const client = createClaudeClient();
   if (!client) throw new Error('Claude API key not configured');
 
-  const prompt = `You previously transcribed a student's answer script and flagged some words as uncertain. You will now see the student's calibration sample (text written in their handwriting) to help resolve ONLY those flagged items.
+  const prompt = `You previously transcribed a script and flagged uncertain words. Use the calibration sample (student's handwriting) to resolve ONLY flagged items.
 
-Flagged items from Pass 1:
+Flagged items:
 ${JSON.stringify(flagged, null, 2)}
 
-Instructions:
-1. Do NOT re-read or revise any part of the transcription that was NOT flagged. Treat the confident transcription as final and locked.
-2. For each flagged item only, compare the ambiguous letter/stroke shape against the equivalent letter shapes in the calibration sample.
-3. Choose the reading that best matches the student's known letter formation, but if the calibration sample doesn't clearly resolve it either, keep your original contextual best-guess rather than forcing a match.
-4. Return only updates to the flagged items — do not re-output the full transcription.
+Rules:
+1. Do NOT revise non-flagged text.
+2. For each flagged item, compare letter shapes to calibration.
+3. If calibration does not resolve it, keep original guess.
+4. Return only updates.
 
-Return ONLY valid JSON:
+JSON only:
 {
   "resolved_uncertainties": [
     {
@@ -164,10 +166,7 @@ Return ONLY valid JSON:
 
   const content: any[] = [
     { type: 'text', text: prompt },
-    {
-      type: 'text',
-      text: 'CALIBRATION SAMPLE (handwriting reference only):',
-    },
+    { type: 'text', text: 'CALIBRATION SAMPLE (handwriting reference):' },
     {
       type: 'image',
       source: {
@@ -178,7 +177,6 @@ Return ONLY valid JSON:
     },
   ];
 
-  // Include answer pages so model can see context of flagged locations
   for (const img of answerImages.slice(0, 10)) {
     content.push({ type: 'text', text: img.label });
     content.push({
@@ -205,7 +203,6 @@ Return ONLY valid JSON:
     : [];
 }
 
-/** Apply Pass 2 resolutions onto Pass 1 transcript (best-effort replace) */
 function mergeTranscription(
   full: string,
   flagged: FlaggedUncertainty[],
@@ -216,22 +213,16 @@ function mergeTranscription(
     const flag = flagged.find(
       (f) =>
         f.location === r.location ||
-        f.guess === r.final_answer ||
         (r.location && f.location && r.location.includes(f.location))
     );
     const from = flag?.guess;
     if (from && r.final_answer && from !== r.final_answer) {
-      // replace first occurrence of the guess word/phrase
       text = text.replace(from, r.final_answer);
     }
   }
   return text;
 }
 
-/**
- * Two-pass transcription:
- * Pass 1 always (no cal). Pass 2 only if flags + calibration URL available.
- */
 export async function runTwoPassTranscription(input: {
   pages: { pageNumber?: number; imageUrl?: string; thumbnailUrl?: string }[];
   examTitle: string;
@@ -239,9 +230,7 @@ export async function runTwoPassTranscription(input: {
 }): Promise<TwoPassResult> {
   const answerImages = await loadAnswerImages(input.pages || []);
   if (answerImages.length === 0) {
-    throw new Error(
-      'No readable answer page images (check storage public URLs)'
-    );
+    throw new Error('No readable answer page images');
   }
 
   console.log('[two-pass] Pass 1 pages=', answerImages.length);

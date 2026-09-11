@@ -1,36 +1,11 @@
 import type { Evaluation, Rubric, Submission } from '../types';
 import { createClaudeClient, getClaudeModel } from './claude-client';
+import { runTwoPassTranscription } from './two-pass-transcription';
 
 function genId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 }
 
-async function urlToBase64(
-  url: string
-): Promise<{ mediaType: string; data: string } | null> {
-  try {
-    const res = await fetch(url);
-    if (!res.ok) {
-      console.error('urlToBase64 HTTP', res.status, url.slice(0, 80));
-      return null;
-    }
-    const blob = await res.blob();
-    const mediaType = blob.type || 'image/jpeg';
-    const buf = await blob.arrayBuffer();
-    let binary = '';
-    const bytes = new Uint8Array(buf);
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-    }
-    return { mediaType, data: btoa(binary) };
-  } catch (e) {
-    console.error('urlToBase64', e);
-    return null;
-  }
-}
-
-/** Force one scored row per rubric question; never allow single collapsed total */
 function alignQuestionsToRubric(
   parsedQuestions: any[],
   rubric: Rubric,
@@ -47,8 +22,8 @@ function alignQuestionsToRubric(
       maxMarks: Number(q.maxMarks) || 0,
       feedback: String(q.feedback || ''),
       confidence: Number(q.confidence) || 0.7,
-      marksGained: Array.isArray(q.marksGained) ? q.marksGained : [],
-      marksLost: Array.isArray(q.marksLost) ? q.marksLost : [],
+      marksGained: Array.isArray(q.marksGained) ? q.marksGained.map(String) : [],
+      marksLost: Array.isArray(q.marksLost) ? q.marksLost.map(String) : [],
       criteriaScores: Array.isArray(q.criteriaScores) ? q.criteriaScores : [],
     }));
   }
@@ -61,7 +36,6 @@ function alignQuestionsToRubric(
     if (q.questionNumber != null) byNum.set(String(q.questionNumber), q);
   }
 
-  // If model returned only 1 blob for multi-question rubric, split proportionally as last resort
   const collapsed =
     (parsedQuestions?.length || 0) <= 1 && rqs.length > 1
       ? parsedQuestions?.[0]
@@ -81,8 +55,9 @@ function alignQuestionsToRubric(
           rqs.reduce((s, x) => s + (x.maxMarks || 0), 0)
         );
       const awarded = Math.round(
-        (Number(collapsed.awardedMarks ?? collapsed.totalAwarded ?? overallTotal) ||
-          0) * share
+        (Number(
+          collapsed.awardedMarks ?? collapsed.totalAwarded ?? overallTotal
+        ) || 0) * share
       );
       q = {
         ...collapsed,
@@ -97,41 +72,7 @@ function alignQuestionsToRubric(
 
     const maxMarks = Number(rq.maxMarks) || 0;
     let awarded = Number(q?.awardedMarks ?? q?.totalAwarded ?? 0);
-    if (awarded > maxMarks) awarded = maxMarks;
-    if (awarded < 0) awarded = 0;
-
-    const marksGained: string[] = Array.isArray(q?.marksGained)
-      ? q.marksGained.map(String)
-      : [];
-    const marksLost: string[] = Array.isArray(q?.marksLost)
-      ? q.marksLost.map(String)
-      : [];
-
-    // Build criteriaScores from rubric criteria when model skipped them
-    let criteriaScores = Array.isArray(q?.criteriaScores)
-      ? q.criteriaScores.map((cs: any) => ({
-          criterionId: cs.criterionId || cs.id,
-          criterion: cs.criterion || cs.description || '',
-          awarded: Number(cs.awarded ?? cs.awardedMarks ?? 0),
-          max: Number(cs.max ?? cs.maxMarks ?? 0),
-        }))
-      : [];
-
-    if (!criteriaScores.length && (rq.criteria || []).length) {
-      // Distribute question marks across criteria proportionally if AI omitted them
-      const crits = rq.criteria || [];
-      const critMax = crits.reduce((s, c) => s + (c.maxMarks || 0), 0) || maxMarks;
-      criteriaScores = crits.map((c) => {
-        const cmax = Number(c.maxMarks) || 0;
-        const cAward = Math.round(awarded * (cmax / Math.max(1, critMax)));
-        return {
-          criterionId: c.id,
-          criterion: c.description || c.id,
-          awarded: Math.min(cmax, cAward),
-          max: cmax,
-        };
-      });
-    }
+    awarded = Math.max(0, Math.min(maxMarks, Math.round(awarded)));
 
     return {
       questionId: rq.id,
@@ -142,11 +83,129 @@ function alignQuestionsToRubric(
       maxMarks,
       feedback: String(q?.feedback || ''),
       confidence: Number(q?.confidence) || 0.7,
-      marksGained,
-      marksLost,
-      criteriaScores,
+      marksGained: Array.isArray(q?.marksGained)
+        ? q.marksGained.map(String)
+        : [],
+      marksLost: Array.isArray(q?.marksLost) ? q.marksLost.map(String) : [],
+      criteriaScores: Array.isArray(q?.criteriaScores)
+        ? q.criteriaScores
+        : [],
     };
   });
+}
+
+/** Grade from final transcript + rubric (text only — stable, no cal bias) */
+async function gradeFromTranscript(input: {
+  transcription: string;
+  rubric: Rubric;
+  examTitle: string;
+  maxMarks: number;
+}): Promise<{
+  totalMarks: number;
+  overallConfidence: number;
+  questions: any[];
+  flags: string[];
+}> {
+  const client = createClaudeClient();
+  if (!client) {
+    return {
+      totalMarks: Math.round(input.maxMarks * 0.6),
+      overallConfidence: 0.4,
+      questions: [],
+      flags: ['NO_CLAUDE_API_KEY'],
+    };
+  }
+
+  const rqs = input.rubric.questions || [];
+  const qCount = rqs.length || 1;
+
+  const requiredShape = rqs
+    .map(
+      (q, i) =>
+        `  {
+    "questionId": "${q.id}",
+    "questionNumber": "${q.number ?? i + 1}",
+    "awardedMarks": <0-${q.maxMarks}>,
+    "maxMarks": ${q.maxMarks},
+    "feedback": "<for this question only>",
+    "confidence": <0-1>,
+    "marksGained": ["..."],
+    "marksLost": ["..."]
+  }`
+    )
+    .join(',\n');
+
+  const rubricText = rqs
+    .map(
+      (q, i) =>
+        `Q${q.number || i + 1} id=${q.id} max=${q.maxMarks}: ${q.questionText}`
+    )
+    .join('\n');
+
+  const prompt = `You are a strict exam marker. Score ONLY from the transcript below (already transcribed from handwriting).
+
+HARD RULES:
+1. Exactly ${qCount} items in "questions" — one per rubric question. Never one overall score.
+2. questionId and maxMarks must match the template.
+3. totalMarks = sum of awardedMarks.
+4. Ignore student identity.
+5. marksGained / marksLost = concrete points per question.
+6. JSON only.
+
+Exam: ${input.examTitle}
+Max total: ${input.maxMarks}
+
+RUBRIC:
+${rubricText}
+
+REQUIRED questions shape:
+[
+${requiredShape}
+]
+
+TRANSCRIPT:
+"""
+${input.transcription}
+"""
+
+Return:
+{
+  "totalMarks": number,
+  "maxMarks": ${input.maxMarks},
+  "overallConfidence": 0.0-1.0,
+  "questions": [ /* ${qCount} items */ ],
+  "flags": []
+}`;
+
+  const msg = await client.messages.create({
+    model: getClaudeModel(),
+    max_tokens: 5000,
+    temperature: 0,
+    messages: [{ role: 'user', content: prompt }],
+  });
+
+  const text = msg.content[0].type === 'text' ? msg.content[0].text : '';
+  const match = text.match(/\{[\s\S]*\}/);
+  if (!match) throw new Error('Grade step did not return JSON');
+  const parsed = JSON.parse(match[0]);
+
+  const questions = alignQuestionsToRubric(
+    Array.isArray(parsed.questions) ? parsed.questions : [],
+    input.rubric,
+    Number(parsed.totalMarks) || 0
+  );
+  let totalMarks = questions.reduce(
+    (s: number, q: any) => s + (Number(q.awardedMarks) || 0),
+    0
+  );
+  totalMarks = Math.max(0, Math.min(input.maxMarks, Math.round(totalMarks)));
+
+  return {
+    totalMarks,
+    overallConfidence: Number(parsed.overallConfidence) || 0.7,
+    questions,
+    flags: Array.isArray(parsed.flags) ? parsed.flags : [],
+  };
 }
 
 export async function runClaudeEvaluation(input: {
@@ -156,12 +215,11 @@ export async function runClaudeEvaluation(input: {
   studentName: string;
   calibrationImageUrl?: string;
 }): Promise<Evaluation> {
-  const client = createClaudeClient();
   const { submission, rubric, examTitle, studentName } = input;
-
   const maxMarks =
     rubric.questions?.reduce((s, q) => s + (q.maxMarks || 0), 0) || 100;
 
+  const client = createClaudeClient();
   if (!client) {
     return {
       id: genId('eval'),
@@ -176,8 +234,7 @@ export async function runClaudeEvaluation(input: {
       overallConfidence: 0.4,
       overallConfidenceLevel: 'LOW',
       flags: ['NO_CLAUDE_API_KEY'],
-      transcription:
-        'Claude API key not configured. Open Admin → Claude Setup and paste your key.',
+      transcription: 'Claude API key not configured.',
       questions: (rubric.questions || []).map((q) => ({
         questionId: q.id,
         id: q.id,
@@ -185,7 +242,7 @@ export async function runClaudeEvaluation(input: {
         awardedMarks: Math.round((q.maxMarks || 0) * 0.6),
         totalAwarded: Math.round((q.maxMarks || 0) * 0.6),
         maxMarks: q.maxMarks || 0,
-        feedback: 'Configure Claude API key for real scoring.',
+        feedback: 'Configure API key.',
         confidence: 0.3,
         marksGained: [],
         marksLost: [],
@@ -195,175 +252,67 @@ export async function runClaudeEvaluation(input: {
     } as Evaluation;
   }
 
-  const sortedPages = [...(submission.pages || [])].sort(
-    (a, b) => (a.pageNumber || 0) - (b.pageNumber || 0)
-  );
-
-  const answerImages: { mediaType: string; data: string; label: string }[] =
-    [];
-  for (const page of sortedPages) {
-    const url = page.imageUrl || page.thumbnailUrl;
-    if (
-      !url ||
-      url.startsWith('blob:') ||
-      url.includes('unsplash') ||
-      url.includes('placeholder')
-    ) {
-      continue;
-    }
-    const b64 = await urlToBase64(url);
-    if (b64) {
-      answerImages.push({
-        ...b64,
-        label: `Answer page ${page.pageNumber}`,
-      });
-    }
-  }
-
-  let calibrationB64: { mediaType: string; data: string } | null = null;
-  if (
-    input.calibrationImageUrl &&
-    !input.calibrationImageUrl.startsWith('blob:') &&
-    !input.calibrationImageUrl.includes('unsplash')
-  ) {
-    calibrationB64 = await urlToBase64(input.calibrationImageUrl);
-  }
-
-  if (answerImages.length === 0) {
-    throw new Error(
-      'No readable answer page images (check storage public URLs, not blob/local)'
-    );
-  }
-
-  const rubricText = (rubric.questions || [])
-    .map((q, i) => {
-      const crit = (q.criteria || [])
-        .map((c) => `    - ${c.description} [max ${c.maxMarks}]`)
-        .join('\n');
-      return `Q${q.number || i + 1} | id=${q.id} | maxMarks=${q.maxMarks}
-  Text: ${q.questionText}
-  Criteria:\n${crit || '    (no sub-criteria)'}`;
-    })
-    .join('\n\n');
-
-  const qCount = (rubric.questions || []).length || 1;
-
-  const prompt = `You are a strict exam marker for handwritten answer scripts.
-
-CRITICAL RULES:
-1. You MUST return exactly ${qCount} items in "questions" — one for EACH rubric question below. Never merge into one overall score.
-2. Each questions[i].questionId MUST match the rubric id. Each maxMarks MUST match the rubric.
-3. totalMarks MUST equal the sum of all questions[].awardedMarks.
-4. Score ONLY from answer page images. Calibration is handwriting reference only — do not score it.
-5. Ignore student name/identity.
-6. For every question provide:
-   - marksGained: array of specific content points that earned marks (concrete, not vague)
-   - marksLost: array of specific missing/wrong/incomplete points that lost marks
-7. Return ONLY valid JSON.
-
-Exam: ${examTitle}
-Rubric max total: ${maxMarks}
-
-RUBRIC (score each question separately):
-${rubricText}
-
-Answer pages: ${answerImages.length}
-Calibration attached: ${calibrationB64 ? 'yes (reference only)' : 'no'}
-
-JSON schema:
-{
-  "transcription": "full text from answer pages",
-  "totalMarks": number,
-  "maxMarks": ${maxMarks},
-  "overallConfidence": 0.0-1.0,
-  "questions": [
-    {
-      "questionId": "must match rubric id",
-      "questionNumber": "1",
-      "awardedMarks": number,
-      "maxMarks": number,
-      "feedback": "2-4 sentence summary for this question only",
-      "confidence": 0.0-1.0,
-      "marksGained": ["specific point that earned marks", "..."],
-      "marksLost": ["specific point missing or weak", "..."],
-      "criteriaScores": [
-        { "criterionId": "...", "criterion": "...", "awarded": number, "max": number }
-      ]
-    }
-  ],
-  "flags": []
-}`;
-
-  const content: any[] = [{ type: 'text', text: prompt }];
-
-  if (calibrationB64) {
-    content.push({
-      type: 'text',
-      text: 'CALIBRATION SAMPLE (handwriting style only — do not score):',
-    });
-    content.push({
-      type: 'image',
-      source: {
-        type: 'base64',
-        media_type: calibrationB64.mediaType,
-        data: calibrationB64.data,
-      },
-    });
-  }
-
-  for (const img of answerImages.slice(0, 20)) {
-    content.push({ type: 'text', text: img.label });
-    content.push({
-      type: 'image',
-      source: {
-        type: 'base64',
-        media_type: img.mediaType,
-        data: img.data,
-      },
-    });
-  }
-
-  const msg = await client.messages.create({
-    model: getClaudeModel(),
-    max_tokens: 5000,
-    temperature: 0,
-    messages: [{ role: 'user', content }],
+  // ——— TWO-PASS TRANSCRIPTION ———
+  const tp = await runTwoPassTranscription({
+    pages: submission.pages || [],
+    examTitle,
+    calibrationImageUrl: input.calibrationImageUrl,
   });
 
-  const text = msg.content[0].type === 'text' ? msg.content[0].text : '';
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) {
-    console.error('Claude raw (no JSON):', text.slice(0, 500));
-    throw new Error('Claude did not return JSON');
-  }
+  console.log(
+    '[two-pass] done transcriptLen=',
+    tp.fullTranscription.length,
+    'flags=',
+    tp.flaggedUncertainties.length,
+    'pass2=',
+    tp.pass2Ran
+  );
 
-  let parsed: any;
-  try {
-    parsed = JSON.parse(match[0]);
-  } catch {
-    throw new Error('Claude returned invalid JSON');
-  }
-
-  const conf = Number(parsed.overallConfidence) || 0.7;
-  let questions = alignQuestionsToRubric(
-    Array.isArray(parsed.questions) ? parsed.questions : [],
+  // ——— GRADE FROM TRANSCRIPT (per rubric Q) ———
+  const graded = await gradeFromTranscript({
+    transcription: tp.fullTranscription,
     rubric,
-    Number(parsed.totalMarks) || 0
-  );
+    examTitle,
+    maxMarks,
+  });
 
-  let totalMarks = questions.reduce(
-    (s: number, q: any) => s + (Number(q.awardedMarks) || 0),
-    0
-  );
-  totalMarks = Math.max(0, Math.min(maxMarks, Math.round(totalMarks)));
+  const conf = graded.overallConfidence;
+  const extraFlags = [
+    ...graded.flags,
+    ...(tp.pass2Ran ? ['TWO_PASS_CALIBRATION_USED'] : []),
+    ...(tp.flaggedUncertainties.length
+      ? [`UNCERTAINTIES_${tp.flaggedUncertainties.length}`]
+      : []),
+  ];
+
+  let transcriptionOut = tp.fullTranscription;
+  if (tp.flaggedUncertainties.length) {
+    transcriptionOut +=
+      '\n\n--- AI uncertainty notes ---\n' +
+      tp.flaggedUncertainties
+        .map((f) => `• "${f.guess}" @ ${f.location}: ${f.ambiguity_note}`)
+        .join('\n');
+    if (tp.resolvedUncertainties.length) {
+      transcriptionOut +=
+        '\n--- Resolved via calibration ---\n' +
+        tp.resolvedUncertainties
+          .map(
+            (r) =>
+              `• ${r.location} → "${r.final_answer}" (${r.resolved_via})`
+          )
+          .join('\n');
+    }
+  }
 
   console.log(
     '[Claude eval] Q count',
-    questions.length,
+    graded.questions.length,
     'rubric Qs',
     rubric.questions?.length,
     'total',
-    totalMarks
+    graded.totalMarks,
+    'pass2',
+    tp.pass2Ran
   );
 
   return {
@@ -374,14 +323,14 @@ JSON schema:
     studentId: submission.studentId,
     studentName,
     status: 'AI_COMPLETE',
-    totalMarks,
-    maxMarks: Number(parsed.maxMarks) || maxMarks,
+    totalMarks: graded.totalMarks,
+    maxMarks,
     overallConfidence: conf,
     overallConfidenceLevel:
       conf >= 0.85 ? 'HIGH' : conf >= 0.6 ? 'MEDIUM' : 'LOW',
-    flags: Array.isArray(parsed.flags) ? parsed.flags : [],
-    transcription: String(parsed.transcription || ''),
-    questions,
+    flags: extraFlags,
+    transcription: transcriptionOut,
+    questions: graded.questions,
     aiGeneratedAt: new Date().toISOString(),
     createdAt: new Date().toISOString(),
   } as Evaluation;
