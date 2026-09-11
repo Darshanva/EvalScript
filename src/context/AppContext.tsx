@@ -211,7 +211,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
     }
     case 'UPDATE_RUBRIC':
       return {
-        ...state,
+      ...state,
         rubrics: state.rubrics.map((r) =>
           r.id === action.rubric.id ? action.rubric : r
         ),
@@ -583,9 +583,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
       });
       updateSubmissionStatus(submissionId, 'PROCESSING').catch(console.error);
 
-      // Fair scoring: do NOT pass per-student calibration into grading.
-      // Same answer pages should get stable marks across students.
-      // Calibration remains available for handwriting practice UI only.
+      // Calibration: used ONLY in two-pass Pass 2 (flagged doubts).
+      // Grading is from final transcript text — not from calibration image.
+      const calibration = state.calibrations.find(
+        (c) => c.studentId === submission.studentId
+      );
+      const calibrationImageUrl =
+        calibration?.imageUrl ||
+        (calibration as any)?.imageUrls?.slow ||
+        (calibration as any)?.imageUrls?.medium ||
+        undefined;
+
       const useClaude =
         state.systemSettings.aiMode === 'claude' ||
         state.systemSettings.aiProvider === 'claude' ||
@@ -601,7 +609,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
               rubric: rubric!,
               examTitle: `${exam.title} (${exam.code})`,
               studentName: submission.studentName || 'Student',
-              calibrationImageUrl: undefined,
+              calibrationImageUrl,
             });
           } else {
             evaluation = runDemoEvaluation({
@@ -691,6 +699,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       state.submissions,
       state.exams,
       state.rubrics,
+      state.calibrations,
       state.systemSettings,
       state.currentUser,
       addAuditLog,
