@@ -522,7 +522,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const processEvaluation = useCallback(
+    const processEvaluation = useCallback(
     (submissionId: string) => {
       const submission = state.submissions.find((s) => s.id === submissionId);
       if (!submission) {
@@ -539,18 +539,41 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return;
       }
 
+      // Prefer real multi-question rubric — NEVER prefer empty/auto if better exists
       let rubric =
         state.rubrics.find((r) => r.examId === submission.examId) ||
         state.rubrics.find((r) => r.id === exam.rubricId);
 
-      if (!rubric) {
+      // If multiple rubrics for exam, pick the one with MOST questions
+      const examRubrics = state.rubrics.filter(
+        (r) => r.examId === submission.examId || r.id === exam.rubricId
+      );
+      if (examRubrics.length > 1) {
+        rubric = examRubrics.reduce((best, r) =>
+          (r.questions?.length || 0) > (best.questions?.length || 0) ? r : best
+        );
+      }
+
+      const rubricQCount = rubric?.questions?.length || 0;
+      const isWeakAuto =
+        !rubric ||
+        rubricQCount === 0 ||
+        (rubricQCount === 1 &&
+          (rubric.questions?.[0]?.questionText || '')
+            .toLowerCase()
+            .includes('overall'));
+
+      if (isWeakAuto) {
         console.warn(
-          '[AI] AUTO RUBRIC — no cloud rubric for exam',
+          '[AI] Weak/auto rubric for exam',
           exam.id,
           exam.code,
-          'maxMarks',
-          exam.maxMarks
+          '— faculty should attach Q1..Qn rubric. Using best available.'
         );
+      }
+
+      if (!rubric || rubricQCount === 0) {
+        // Last resort only — single overall (causes Q1/100 UI)
         rubric = {
           id: exam.rubricId || `rubric-auto-${exam.id}`,
           examId: exam.id,
@@ -576,6 +599,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         saveRubric(rubric).catch(console.error);
       }
 
+      console.log(
+        '[AI] Using rubric',
+        rubric.id,
+        'questions=',
+        rubric.questions?.length,
+        rubric.questions?.map((q) => `${q.number}:${q.maxMarks}`).join(', ')
+      );
+
       dispatch({
         type: 'UPDATE_SUBMISSION_STATUS',
         submissionId,
@@ -583,8 +614,6 @@ export function AppProvider({ children }: { children: ReactNode }) {
       });
       updateSubmissionStatus(submissionId, 'PROCESSING').catch(console.error);
 
-      // Calibration: used ONLY in two-pass Pass 2 (flagged doubts).
-      // Grading is from final transcript text — not from calibration image.
       const calibration = state.calibrations.find(
         (c) => c.studentId === submission.studentId
       );
@@ -630,7 +659,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
             examTitle: evaluation.examTitle || exam.title,
             examCode: exam.code,
             status: 'AI_COMPLETE',
-            aiGeneratedAt: evaluation.aiGeneratedAt || new Date().toISOString(),
+            aiGeneratedAt:
+              evaluation.aiGeneratedAt || new Date().toISOString(),
           };
 
           dispatch({ type: 'ADD_EVALUATION', evaluation });
@@ -659,11 +689,10 @@ export function AppProvider({ children }: { children: ReactNode }) {
                 'AI done but cloud save failed — check evaluations table / RLS',
               toastType: 'error',
             });
-            console.error('saveEvaluation returned false', evaluation.id);
           } else {
             dispatch({
               type: 'SHOW_TOAST',
-              message: `AI complete: ${evaluation.studentName} ${evaluation.totalMarks}/${evaluation.maxMarks}`,
+              message: `AI complete: ${evaluation.studentName} ${evaluation.totalMarks}/${evaluation.maxMarks} (${evaluation.questions?.length || 0} Qs)`,
               toastType: 'success',
             });
           }
@@ -676,7 +705,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
               action: 'AI_EVALUATION_COMPLETE',
               entity: 'evaluation',
               entityId: evaluation.id,
-              details: `AI scored ${evaluation.totalMarks}/${evaluation.maxMarks} for ${evaluation.studentName}.`,
+              details: `AI scored ${evaluation.totalMarks}/${evaluation.maxMarks} for ${evaluation.studentName} (${evaluation.questions?.length || 0} questions).`,
             });
           }
         } catch (e: any) {
