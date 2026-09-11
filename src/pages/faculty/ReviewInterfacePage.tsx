@@ -23,12 +23,9 @@ function pct(n: number, d: number) {
   return d > 0 ? Math.round((n / d) * 100) : 0;
 }
 
-/** Normalize Claude / demo question shapes into one shape the UI expects */
 function normalizeQuestion(q: any, index: number): EvaluationQuestion {
   const id =
-    q.id ||
-    q.questionId ||
-    `q-${q.questionNumber ?? index + 1}-${index}`;
+    q.id || q.questionId || `q-${q.questionNumber ?? index + 1}-${index}`;
   const maxMarks = Number(q.maxMarks) || 0;
   const totalAwarded = Number(
     q.totalAwarded ?? q.awardedMarks ?? q.facultyAwarded ?? 0
@@ -44,7 +41,8 @@ function normalizeQuestion(q: any, index: number): EvaluationQuestion {
     questionNumber: String(q.questionNumber ?? index + 1),
     maxMarks,
     totalAwarded,
-    facultyAwarded: q.facultyAwarded != null ? Number(q.facultyAwarded) : undefined,
+    facultyAwarded:
+      q.facultyAwarded != null ? Number(q.facultyAwarded) : undefined,
     feedback: String(q.feedback || ''),
     facultyFeedback: q.facultyFeedback,
     studentAnswer: q.studentAnswer || q.answerSummary || '',
@@ -52,9 +50,13 @@ function normalizeQuestion(q: any, index: number): EvaluationQuestion {
     confidence,
     confidenceLevel,
     flags: Array.isArray(q.flags) ? q.flags : [],
+    marksGained: Array.isArray(q.marksGained)
+      ? q.marksGained.map(String)
+      : [],
+    marksLost: Array.isArray(q.marksLost) ? q.marksLost.map(String) : [],
     criteriaScores: Array.isArray(q.criteriaScores)
       ? q.criteriaScores.map((cs: any) => ({
-          criterionId: cs.criterionId || cs.id || `c-${Math.random()}`,
+          criterionId: cs.criterionId || cs.id || `c-${index}`,
           criterion: cs.criterion || cs.description || 'Criterion',
           awarded: Number(cs.awarded ?? cs.awardedMarks ?? 0),
           max: Number(cs.max ?? cs.maxMarks ?? 0),
@@ -68,7 +70,6 @@ function normalizeEvaluation(ev: Evaluation): Evaluation {
   return { ...ev, questions };
 }
 
-/** Build justification: where marks gained / lost */
 function buildJustification(q: EvaluationQuestion): {
   gained: string[];
   lost: string[];
@@ -77,32 +78,43 @@ function buildJustification(q: EvaluationQuestion): {
   const gained: string[] = [];
   const lost: string[] = [];
 
+  // 1) Prefer explicit AI point lists
+  const mg = (q as any).marksGained as string[] | undefined;
+  const ml = (q as any).marksLost as string[] | undefined;
+  if (Array.isArray(mg)) {
+    for (const g of mg) if (g?.trim()) gained.push(g.trim());
+  }
+  if (Array.isArray(ml)) {
+    for (const g of ml) if (g?.trim()) lost.push(g.trim());
+  }
+
+  // 2) Criteria breakdown
   if (q.criteriaScores?.length) {
     for (const cs of q.criteriaScores) {
-      if (cs.awarded >= cs.max && cs.max > 0) {
-        gained.push(`Full marks on “${cs.criterion}” (${cs.awarded}/${cs.max}).`);
+      if (cs.max <= 0) continue;
+      if (cs.awarded >= cs.max) {
+        gained.push(`Full marks: “${cs.criterion}” (${cs.awarded}/${cs.max})`);
       } else if (cs.awarded > 0) {
         gained.push(
-          `Partial marks on “${cs.criterion}” (${cs.awarded}/${cs.max}).`
+          `Partial: “${cs.criterion}” (${cs.awarded}/${cs.max})`
         );
-        if (cs.awarded < cs.max) {
-          lost.push(
-            `Lost ${cs.max - cs.awarded} on “${cs.criterion}” (${cs.awarded}/${cs.max}).`
-          );
-        }
-      } else if (cs.max > 0) {
-        lost.push(`No marks on “${cs.criterion}” (0/${cs.max}).`);
+        lost.push(
+          `Lost ${cs.max - cs.awarded} on “${cs.criterion}” (${cs.awarded}/${cs.max})`
+        );
+      } else {
+        lost.push(`Missing: “${cs.criterion}” (0/${cs.max})`);
       }
     }
   }
 
+  // 3) Fallback only if nothing specific
   const awarded = q.totalAwarded ?? 0;
   const max = q.maxMarks || 0;
   if (!gained.length && !lost.length) {
     if (awarded >= max && max > 0) {
       gained.push(`Awarded full ${awarded}/${max} for this question.`);
     } else if (awarded > 0) {
-      gained.push(`Awarded ${awarded}/${max} overall for this question.`);
+      gained.push(`Awarded ${awarded}/${max} for this question.`);
       lost.push(`Short of full marks by ${max - awarded}.`);
     } else {
       lost.push(`No marks awarded (0/${max}).`);
@@ -118,8 +130,14 @@ function buildJustification(q: EvaluationQuestion): {
 }
 
 export default function ReviewInterfacePage() {
-  const { state, navigate, updateEvaluation, publishEvaluation, showToast, reloadCloudData } =
-    useApp();
+  const {
+    state,
+    navigate,
+    updateEvaluation,
+    publishEvaluation,
+    showToast,
+    reloadCloudData,
+  } = useApp();
   const location = useLocation();
   const { navCtx, evaluations, submissions } = state;
 
@@ -134,10 +152,12 @@ export default function ReviewInterfacePage() {
   const [selectedQuestion, setSelectedQuestion] = useState(0);
   const [zoom, setZoom] = useState<ZoomLevel>(1);
   const [rotation, setRotation] = useState(0);
-  const [facultyMarks, setFacultyMarks] = useState<Record<string, number>>({});
-  const [facultyFeedback, setFacultyFeedback] = useState<Record<string, string>>(
+  const [facultyMarks, setFacultyMarks] = useState<Record<string, number>>(
     {}
   );
+  const [facultyFeedback, setFacultyFeedback] = useState<
+    Record<string, string>
+  >({});
   const [facultyNotes, setFacultyNotes] = useState('');
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [saving, setSaving] = useState(false);
@@ -155,30 +175,33 @@ export default function ReviewInterfacePage() {
     let cancelled = false;
     async function load() {
       setLoading(true);
-      let ev =
-        evaluations.find((e) => e.id === evalId) ??
+      if (!evalId) {
+        setEvaluation(null);
+        setLoading(false);
+        return;
+      }
+
+      let found =
+        evaluations.find((e) => e.id === evalId) ||
+        state.evaluations.find((e) => e.id === evalId) ||
         null;
 
-      if (!ev && reloadCloudData) {
+      if (!found && reloadCloudData) {
         await reloadCloudData();
       }
-      // re-read after reload from latest state is hard; try find again from state after short wait
-      if (!ev) {
-        ev = state.evaluations.find((e) => e.id === evalId) ?? null;
-      }
 
-      if (!cancelled && evalId) {
-        const found =
-          evaluations.find((e) => e.id === evalId) ||
-          state.evaluations.find((e) => e.id === evalId) ||
-          null;
+      found =
+        evaluations.find((e) => e.id === evalId) ||
+        state.evaluations.find((e) => e.id === evalId) ||
+        null;
+
+      if (!cancelled) {
         if (found) {
           const normalized = normalizeEvaluation(found);
           setEvaluation(normalized);
           const marks: Record<string, number> = {};
           const feedback: Record<string, string> = {};
           normalized.questions.forEach((q) => {
-            // Prefer faculty override if already set; else AI marks
             marks[q.id] =
               q.facultyAwarded != null ? q.facultyAwarded : q.totalAwarded;
             feedback[q.id] = q.facultyFeedback ?? q.feedback ?? '';
@@ -186,11 +209,12 @@ export default function ReviewInterfacePage() {
           setFacultyMarks(marks);
           setFacultyFeedback(feedback);
           setFacultyNotes(found.facultyNotes ?? '');
+          setSelectedQuestion(0);
         } else {
           setEvaluation(null);
         }
+        setLoading(false);
       }
-      if (!cancelled) setLoading(false);
     }
     load();
     return () => {
@@ -222,11 +246,7 @@ export default function ReviewInterfacePage() {
         <p className="text-slate-600 text-sm">Evaluation not found.</p>
         <p className="text-xs text-slate-400 font-mono">ID: {evalId || '—'}</p>
         <div className="flex gap-2">
-          <Button
-            size="sm"
-            variant="secondary"
-            onClick={() => reloadCloudData?.()}
-          >
+          <Button size="sm" variant="secondary" onClick={() => reloadCloudData?.()}>
             Reload from cloud
           </Button>
           <Button size="sm" onClick={() => navigate('f-reviews')}>
@@ -249,7 +269,6 @@ export default function ReviewInterfacePage() {
     (sum, q) => sum + (q.totalAwarded || 0),
     0
   );
-  // Prefer sum of question AI marks when available; else evaluation.totalMarks
   const displayAiTotal =
     totalAiMarks > 0 ? totalAiMarks : evaluation.totalMarks || 0;
 
@@ -271,13 +290,11 @@ export default function ReviewInterfacePage() {
 
   async function handleSaveDraft() {
     setSaving(true);
-    const hasErrors = Object.values(errors).some(Boolean);
-    if (hasErrors) {
+    if (Object.values(errors).some(Boolean)) {
       showToast('Please fix mark errors before saving.', 'error');
       setSaving(false);
       return;
     }
-
     const updatedEval: Evaluation = {
       ...evaluation!,
       status: 'REVIEWED',
@@ -293,7 +310,6 @@ export default function ReviewInterfacePage() {
         facultyFeedback: facultyFeedback[q.id] ?? q.feedback,
       })),
     };
-
     await updateEvaluation(updatedEval);
     setEvaluation(normalizeEvaluation(updatedEval));
     showToast('Review saved.', 'success');
@@ -303,13 +319,11 @@ export default function ReviewInterfacePage() {
   async function handlePublish() {
     if (!evaluation) return;
     setPublishing(true);
-    const hasErrors = Object.values(errors).some(Boolean);
-    if (hasErrors) {
+    if (Object.values(errors).some(Boolean)) {
       showToast('Please fix all mark errors before publishing.', 'error');
       setPublishing(false);
       return;
     }
-
     const updatedEval: Evaluation = {
       ...evaluation,
       status: 'PUBLISHED',
@@ -326,7 +340,6 @@ export default function ReviewInterfacePage() {
         facultyFeedback: facultyFeedback[q.id] ?? q.feedback,
       })),
     };
-
     await updateEvaluation(updatedEval);
     await publishEvaluation(evaluation.id, facultyNotes);
     setEvaluation(normalizeEvaluation(updatedEval));
@@ -343,7 +356,6 @@ export default function ReviewInterfacePage() {
 
   return (
     <div className="h-screen flex flex-col bg-slate-100 overflow-hidden">
-      {/* Header */}
       <header className="h-14 bg-white border-b border-slate-200 flex items-center px-4 gap-3 shrink-0 z-10">
         <button
           type="button"
@@ -394,7 +406,6 @@ export default function ReviewInterfacePage() {
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        {/* Left: Image viewer */}
         <div
           className="flex flex-col bg-slate-800 border-r border-slate-700"
           style={{ width: '45%', minWidth: 320 }}
@@ -432,14 +443,13 @@ export default function ReviewInterfacePage() {
               type="button"
               onClick={() => setRotation((r) => (r + 90) % 360)}
               className="w-7 h-7 flex items-center justify-center rounded bg-slate-700 text-white text-sm hover:bg-slate-600"
-              title="Rotate 90°"
             >
               ↻
             </button>
             <button
               type="button"
               onClick={() => setShowTranscription(!showTranscription)}
-              className={`px-2 h-7 rounded text-xs font-medium transition-colors ${
+              className={`px-2 h-7 rounded text-xs font-medium ${
                 showTranscription
                   ? 'bg-navy-600 text-white'
                   : 'bg-slate-700 text-slate-300 hover:bg-slate-600'
@@ -505,15 +515,12 @@ export default function ReviewInterfacePage() {
           </div>
         </div>
 
-        {/* Right: Evaluation panel */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Question tabs — show AI marks (and faculty if different) */}
           <div className="flex items-center gap-1 px-4 py-2 bg-white border-b border-slate-200 overflow-x-auto shrink-0">
             {evaluation.questions.map((q, i) => {
               const aiM = q.totalAwarded ?? 0;
               const facM =
                 facultyMarks[q.id] != null ? facultyMarks[q.id] : aiM;
-              const hasFlag = (q.flags || []).length > 0;
               const hasError = !!errors[q.id];
               return (
                 <button
@@ -527,22 +534,17 @@ export default function ReviewInterfacePage() {
                   } ${hasError ? 'ring-1 ring-red-400' : ''}`}
                 >
                   Q{q.questionNumber}
-                  {hasFlag && <span className="text-amber-400">⚠</span>}
                   <span
                     className={`font-mono ${
-                      i === selectedQuestion ? 'text-white/90' : 'text-slate-500'
+                      i === selectedQuestion
+                        ? 'text-white/90'
+                        : 'text-slate-500'
                     }`}
                   >
                     {aiM}/{q.maxMarks}
                   </span>
                   {facM !== aiM && (
-                    <span
-                      className={`font-mono text-[10px] ${
-                        i === selectedQuestion
-                          ? 'text-amber-200'
-                          : 'text-amber-600'
-                      }`}
-                    >
+                    <span className="font-mono text-[10px] text-amber-600">
                       F:{facM}
                     </span>
                   )}
@@ -561,18 +563,14 @@ export default function ReviewInterfacePage() {
                         Question {currentQuestion.questionNumber}
                       </span>
                       <span className="font-mono text-sm text-slate-500">
-                        AI: {currentQuestion.totalAwarded}/{currentQuestion.maxMarks}
+                        AI: {currentQuestion.totalAwarded}/
+                        {currentQuestion.maxMarks}
                       </span>
                     </div>
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <ConfidenceBadge
-                        level={currentQuestion.confidenceLevel}
-                        score={currentQuestion.confidence}
-                      />
-                      {(currentQuestion.flags || []).map((f) => (
-                        <FlagBadge key={f} flag={f} />
-                      ))}
-                    </div>
+                    <ConfidenceBadge
+                      level={currentQuestion.confidenceLevel}
+                      score={currentQuestion.confidence}
+                    />
                   </div>
                   <div className="text-right shrink-0">
                     <p
@@ -595,7 +593,6 @@ export default function ReviewInterfacePage() {
                   </div>
                 </div>
 
-                {/* Justification — where gained / lost (replaces Student answer AI) */}
                 <Card className="border-slate-200">
                   <h3 className="text-sm font-semibold text-slate-900 mb-3">
                     Justification
@@ -608,7 +605,7 @@ export default function ReviewInterfacePage() {
                       <p className="text-xs font-semibold text-emerald-700 uppercase tracking-wide mb-1.5">
                         Where marks were awarded
                       </p>
-                      <ul className="space-y-1">
+                      <ul className="space-y-1.5">
                         {justification.gained.map((g, i) => (
                           <li
                             key={i}
@@ -626,7 +623,7 @@ export default function ReviewInterfacePage() {
                       <p className="text-xs font-semibold text-amber-700 uppercase tracking-wide mb-1.5">
                         Where marks were lost
                       </p>
-                      <ul className="space-y-1">
+                      <ul className="space-y-1.5">
                         {justification.lost.map((g, i) => (
                           <li
                             key={i}
@@ -641,7 +638,6 @@ export default function ReviewInterfacePage() {
                   )}
                 </Card>
 
-                {/* Criterion scoring if present */}
                 {currentQuestion.criteriaScores?.length > 0 && (
                   <Card>
                     <h3 className="font-semibold text-slate-900 text-sm mb-4">
@@ -668,7 +664,6 @@ export default function ReviewInterfacePage() {
                   </Card>
                 )}
 
-                {/* Faculty marks — prefilled with AI */}
                 <Card
                   className={`border-2 ${
                     isPublished
@@ -740,7 +735,6 @@ export default function ReviewInterfacePage() {
                   )}
                 </Card>
 
-                {/* AI feedback + faculty notes */}
                 <Card>
                   <h3 className="text-sm font-semibold text-slate-900 mb-3">
                     AI feedback
@@ -801,19 +795,8 @@ export default function ReviewInterfacePage() {
                 </div>
               </div>
             )}
-
-            {!currentQuestion && (
-              <div className="p-8 text-center text-slate-500 text-sm">
-                No question breakdown from AI. Overall AI score:{' '}
-                <span className="font-mono font-semibold">
-                  {evaluation.totalMarks}/{evaluation.maxMarks}
-                </span>
-                . You can still publish after review.
-              </div>
-            )}
           </div>
 
-          {/* Footer */}
           <div className="border-t border-slate-200 bg-white px-5 py-3 shrink-0">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-4">
@@ -826,13 +809,7 @@ export default function ReviewInterfacePage() {
                 <div className="w-px h-6 bg-slate-200" />
                 <div>
                   <p className="text-xs text-slate-400">Faculty</p>
-                  <p
-                    className={`font-mono font-semibold ${
-                      totalFacultyMarks !== displayAiTotal
-                        ? 'text-amber-700'
-                        : 'text-slate-900'
-                    }`}
-                  >
+                  <p className="font-mono font-semibold text-slate-900">
                     {totalFacultyMarks}/{evaluation.maxMarks}
                   </p>
                 </div>
@@ -869,10 +846,7 @@ export default function ReviewInterfacePage() {
         <div className="space-y-4">
           <div className="px-4 py-3 bg-amber-50 border border-amber-200 rounded-lg">
             <p className="text-sm text-amber-800">
-              <span className="font-medium">
-                Once published, the student can see this result.
-              </span>{' '}
-              Ensure all marks are correct before proceeding.
+              Once published, the student can see this result.
             </p>
           </div>
           <div className="grid grid-cols-3 gap-3">
@@ -896,7 +870,7 @@ export default function ReviewInterfacePage() {
             </div>
           </div>
           <Textarea
-            label="Faculty notes (optional — visible to student)"
+            label="Faculty notes (optional)"
             placeholder="Overall comments…"
             rows={3}
             value={facultyNotes}

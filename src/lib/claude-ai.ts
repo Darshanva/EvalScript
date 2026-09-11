@@ -30,6 +30,125 @@ async function urlToBase64(
   }
 }
 
+/** Force one scored row per rubric question; never allow single collapsed total */
+function alignQuestionsToRubric(
+  parsedQuestions: any[],
+  rubric: Rubric,
+  overallTotal: number
+): any[] {
+  const rqs = rubric.questions || [];
+  if (!rqs.length) {
+    return (parsedQuestions || []).map((q, i) => ({
+      questionId: q.questionId || q.id || `q-${i + 1}`,
+      id: q.questionId || q.id || `q-${i + 1}`,
+      questionNumber: String(q.questionNumber ?? i + 1),
+      awardedMarks: Number(q.awardedMarks ?? q.totalAwarded ?? 0),
+      totalAwarded: Number(q.awardedMarks ?? q.totalAwarded ?? 0),
+      maxMarks: Number(q.maxMarks) || 0,
+      feedback: String(q.feedback || ''),
+      confidence: Number(q.confidence) || 0.7,
+      marksGained: Array.isArray(q.marksGained) ? q.marksGained : [],
+      marksLost: Array.isArray(q.marksLost) ? q.marksLost : [],
+      criteriaScores: Array.isArray(q.criteriaScores) ? q.criteriaScores : [],
+    }));
+  }
+
+  const byId = new Map<string, any>();
+  const byNum = new Map<string, any>();
+  for (const q of parsedQuestions || []) {
+    if (q.questionId) byId.set(String(q.questionId), q);
+    if (q.id) byId.set(String(q.id), q);
+    if (q.questionNumber != null) byNum.set(String(q.questionNumber), q);
+  }
+
+  // If model returned only 1 blob for multi-question rubric, split proportionally as last resort
+  const collapsed =
+    (parsedQuestions?.length || 0) <= 1 && rqs.length > 1
+      ? parsedQuestions?.[0]
+      : null;
+
+  return rqs.map((rq, i) => {
+    let q =
+      byId.get(String(rq.id)) ||
+      byNum.get(String(rq.number)) ||
+      byNum.get(String(i + 1));
+
+    if (!q && collapsed) {
+      const share =
+        (Number(rq.maxMarks) || 0) /
+        Math.max(
+          1,
+          rqs.reduce((s, x) => s + (x.maxMarks || 0), 0)
+        );
+      const awarded = Math.round(
+        (Number(collapsed.awardedMarks ?? collapsed.totalAwarded ?? overallTotal) ||
+          0) * share
+      );
+      q = {
+        ...collapsed,
+        awardedMarks: awarded,
+        feedback:
+          collapsed.feedback ||
+          `Portion of overall answer mapped to Q${rq.number}.`,
+        marksGained: collapsed.marksGained || [],
+        marksLost: collapsed.marksLost || [],
+      };
+    }
+
+    const maxMarks = Number(rq.maxMarks) || 0;
+    let awarded = Number(q?.awardedMarks ?? q?.totalAwarded ?? 0);
+    if (awarded > maxMarks) awarded = maxMarks;
+    if (awarded < 0) awarded = 0;
+
+    const marksGained: string[] = Array.isArray(q?.marksGained)
+      ? q.marksGained.map(String)
+      : [];
+    const marksLost: string[] = Array.isArray(q?.marksLost)
+      ? q.marksLost.map(String)
+      : [];
+
+    // Build criteriaScores from rubric criteria when model skipped them
+    let criteriaScores = Array.isArray(q?.criteriaScores)
+      ? q.criteriaScores.map((cs: any) => ({
+          criterionId: cs.criterionId || cs.id,
+          criterion: cs.criterion || cs.description || '',
+          awarded: Number(cs.awarded ?? cs.awardedMarks ?? 0),
+          max: Number(cs.max ?? cs.maxMarks ?? 0),
+        }))
+      : [];
+
+    if (!criteriaScores.length && (rq.criteria || []).length) {
+      // Distribute question marks across criteria proportionally if AI omitted them
+      const crits = rq.criteria || [];
+      const critMax = crits.reduce((s, c) => s + (c.maxMarks || 0), 0) || maxMarks;
+      criteriaScores = crits.map((c) => {
+        const cmax = Number(c.maxMarks) || 0;
+        const cAward = Math.round(awarded * (cmax / Math.max(1, critMax)));
+        return {
+          criterionId: c.id,
+          criterion: c.description || c.id,
+          awarded: Math.min(cmax, cAward),
+          max: cmax,
+        };
+      });
+    }
+
+    return {
+      questionId: rq.id,
+      id: rq.id,
+      questionNumber: String(rq.number ?? i + 1),
+      awardedMarks: awarded,
+      totalAwarded: awarded,
+      maxMarks,
+      feedback: String(q?.feedback || ''),
+      confidence: Number(q?.confidence) || 0.7,
+      marksGained,
+      marksLost,
+      criteriaScores,
+    };
+  });
+}
+
 export async function runClaudeEvaluation(input: {
   submission: Submission;
   rubric: Rubric;
@@ -61,18 +180,21 @@ export async function runClaudeEvaluation(input: {
         'Claude API key not configured. Open Admin → Claude Setup and paste your key.',
       questions: (rubric.questions || []).map((q) => ({
         questionId: q.id,
+        id: q.id,
         questionNumber: q.number,
         awardedMarks: Math.round((q.maxMarks || 0) * 0.6),
+        totalAwarded: Math.round((q.maxMarks || 0) * 0.6),
         maxMarks: q.maxMarks || 0,
         feedback: 'Configure Claude API key for real scoring.',
         confidence: 0.3,
+        marksGained: [],
+        marksLost: [],
       })),
       aiGeneratedAt: new Date().toISOString(),
       createdAt: new Date().toISOString(),
     } as Evaluation;
   }
 
-  // Answer pages ONLY — stable order by pageNumber
   const sortedPages = [...(submission.pages || [])].sort(
     (a, b) => (a.pageNumber || 0) - (b.pageNumber || 0)
   );
@@ -87,11 +209,6 @@ export async function runClaudeEvaluation(input: {
       url.includes('unsplash') ||
       url.includes('placeholder')
     ) {
-      console.warn(
-        'Skipping bad page URL',
-        page.pageNumber,
-        url?.slice(0, 60)
-      );
       continue;
     }
     const b64 = await urlToBase64(url);
@@ -100,12 +217,9 @@ export async function runClaudeEvaluation(input: {
         ...b64,
         label: `Answer page ${page.pageNumber}`,
       });
-    } else {
-      console.warn('Failed to load page image', page.pageNumber);
     }
   }
 
-  // Optional calibration — handwriting reference only, not scored
   let calibrationB64: { mediaType: string; data: string } | null = null;
   if (
     input.calibrationImageUrl &&
@@ -121,65 +235,60 @@ export async function runClaudeEvaluation(input: {
     );
   }
 
-  console.log(
-    '[Claude eval]',
-    'pages=',
-    answerImages.length,
-    'cal=',
-    !!calibrationB64,
-    'maxMarks=',
-    maxMarks,
-    'student=',
-    studentName
-  );
-
   const rubricText = (rubric.questions || [])
-    .map(
-      (q, i) =>
-        `Q${q.number || i + 1} (id:${q.id}, max ${q.maxMarks}): ${q.questionText}\n  Criteria: ${(
-          q.criteria || []
-        )
-          .map((c) => `${c.description} [${c.maxMarks}]`)
-          .join('; ')}`
-    )
-    .join('\n');
+    .map((q, i) => {
+      const crit = (q.criteria || [])
+        .map((c) => `    - ${c.description} [max ${c.maxMarks}]`)
+        .join('\n');
+      return `Q${q.number || i + 1} | id=${q.id} | maxMarks=${q.maxMarks}
+  Text: ${q.questionText}
+  Criteria:\n${crit || '    (no sub-criteria)'}`;
+    })
+    .join('\n\n');
+
+  const qCount = (rubric.questions || []).length || 1;
 
   const prompt = `You are a strict exam marker for handwritten answer scripts.
 
-RULES (must follow):
-1. Score ONLY from the ANSWER PAGE images. Do not award marks from the calibration sample.
-2. Ignore student name/identity. Same writing must get the same marks regardless of whose name is on the script.
-3. Use the rubric exactly. totalMarks must equal the sum of question awardedMarks.
-4. If handwriting is unclear, lower confidence but still score what is legible; do not invent answers.
-5. Return ONLY valid JSON, no markdown fences.
+CRITICAL RULES:
+1. You MUST return exactly ${qCount} items in "questions" — one for EACH rubric question below. Never merge into one overall score.
+2. Each questions[i].questionId MUST match the rubric id. Each maxMarks MUST match the rubric.
+3. totalMarks MUST equal the sum of all questions[].awardedMarks.
+4. Score ONLY from answer page images. Calibration is handwriting reference only — do not score it.
+5. Ignore student name/identity.
+6. For every question provide:
+   - marksGained: array of specific content points that earned marks (concrete, not vague)
+   - marksLost: array of specific missing/wrong/incomplete points that lost marks
+7. Return ONLY valid JSON.
 
 Exam: ${examTitle}
 Rubric max total: ${maxMarks}
 
-Rubric:
+RUBRIC (score each question separately):
 ${rubricText}
 
-Answer pages attached: ${answerImages.length}
-Calibration sample attached: ${
-    calibrationB64
-      ? 'yes (handwriting reference only, NOT answers)'
-      : 'no'
-  }
+Answer pages: ${answerImages.length}
+Calibration attached: ${calibrationB64 ? 'yes (reference only)' : 'no'}
 
 JSON schema:
 {
-  "transcription": "text from answer pages only",
+  "transcription": "full text from answer pages",
   "totalMarks": number,
   "maxMarks": ${maxMarks},
   "overallConfidence": 0.0-1.0,
   "questions": [
     {
-      "questionId": "from rubric",
+      "questionId": "must match rubric id",
       "questionNumber": "1",
       "awardedMarks": number,
       "maxMarks": number,
-      "feedback": "short",
-      "confidence": 0.0-1.0
+      "feedback": "2-4 sentence summary for this question only",
+      "confidence": 0.0-1.0,
+      "marksGained": ["specific point that earned marks", "..."],
+      "marksLost": ["specific point missing or weak", "..."],
+      "criteriaScores": [
+        { "criterionId": "...", "criterion": "...", "awarded": number, "max": number }
+      ]
     }
   ],
   "flags": []
@@ -190,7 +299,7 @@ JSON schema:
   if (calibrationB64) {
     content.push({
       type: 'text',
-      text: 'CALIBRATION SAMPLE (handwriting style only — do not score this):',
+      text: 'CALIBRATION SAMPLE (handwriting style only — do not score):',
     });
     content.push({
       type: 'image',
@@ -216,7 +325,7 @@ JSON schema:
 
   const msg = await client.messages.create({
     model: getClaudeModel(),
-    max_tokens: 4000,
+    max_tokens: 5000,
     temperature: 0,
     messages: [{ role: 'user', content }],
   });
@@ -224,30 +333,38 @@ JSON schema:
   const text = msg.content[0].type === 'text' ? msg.content[0].text : '';
   const match = text.match(/\{[\s\S]*\}/);
   if (!match) {
-    console.error('Claude raw response (no JSON):', text.slice(0, 500));
+    console.error('Claude raw (no JSON):', text.slice(0, 500));
     throw new Error('Claude did not return JSON');
   }
 
   let parsed: any;
   try {
     parsed = JSON.parse(match[0]);
-  } catch (e) {
-    console.error('JSON parse failed', match[0].slice(0, 300));
+  } catch {
     throw new Error('Claude returned invalid JSON');
   }
 
   const conf = Number(parsed.overallConfidence) || 0.7;
-  let totalMarks = Number(parsed.totalMarks) || 0;
-  const questions = Array.isArray(parsed.questions) ? parsed.questions : [];
-  if (questions.length) {
-    const sum = questions.reduce(
-      (s: number, q: any) => s + (Number(q.awardedMarks) || 0),
-      0
-    );
-    if (sum > 0) totalMarks = sum;
-  }
+  let questions = alignQuestionsToRubric(
+    Array.isArray(parsed.questions) ? parsed.questions : [],
+    rubric,
+    Number(parsed.totalMarks) || 0
+  );
 
+  let totalMarks = questions.reduce(
+    (s: number, q: any) => s + (Number(q.awardedMarks) || 0),
+    0
+  );
   totalMarks = Math.max(0, Math.min(maxMarks, Math.round(totalMarks)));
+
+  console.log(
+    '[Claude eval] Q count',
+    questions.length,
+    'rubric Qs',
+    rubric.questions?.length,
+    'total',
+    totalMarks
+  );
 
   return {
     id: genId('eval'),
