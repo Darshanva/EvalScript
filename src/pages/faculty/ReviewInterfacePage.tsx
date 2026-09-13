@@ -19,8 +19,166 @@ import { validateFacultyMarks } from '../../lib/marks-validator';
 
 type ZoomLevel = 0.5 | 0.75 | 1 | 1.25 | 1.5;
 
+interface UncertaintyItem {
+  page: string;
+  question: string;
+  guess: string;
+  body: string;
+}
+
 function pct(n: number, d: number) {
   return d > 0 ? Math.round((n / d) * 100) : 0;
+}
+
+/** Split full transcription vs uncertainty appendix */
+function splitTranscription(raw: string): {
+  main: string;
+  uncertaintyBlock: string;
+} {
+  if (!raw) return { main: '', uncertaintyBlock: '' };
+  const markers = [
+    '--- AI uncertainty notes ---',
+    '---AI uncertainty notes---',
+    'AI uncertainty notes',
+  ];
+  let idx = -1;
+  let markerLen = 0;
+  for (const m of markers) {
+    const i = raw.indexOf(m);
+    if (i >= 0) {
+      idx = i;
+      markerLen = m.length;
+      break;
+    }
+  }
+  if (idx < 0) return { main: raw.trim(), uncertaintyBlock: '' };
+  return {
+    main: raw.slice(0, idx).trim(),
+    uncertaintyBlock: raw.slice(idx + markerLen).trim(),
+  };
+}
+
+/**
+ * Parse lines like:
+ * • "AOF" @ Page 1, Question 1, first bullet: Abbreviation written as 'AoF' – could be...
+ * into { page, question, guess, body }
+ */
+function parseUncertaintyNotes(block: string): UncertaintyItem[] {
+  if (!block) return [];
+  const items: UncertaintyItem[] = [];
+  // Support bullet • or - or *
+  const lines = block
+    .split(/\n+/)
+    .map((l) => l.trim())
+    .filter((l) => l && !l.startsWith('---'));
+
+  for (const line of lines) {
+    // Skip "Resolved via calibration" header lines handled separately if needed
+    if (/^---/.test(line) || /^Resolved via/i.test(line)) continue;
+
+    const cleaned = line.replace(/^[•\-\*]\s*/, '');
+
+    // "guess" @ Page X, Question Y, ...: body
+    const m = cleaned.match(
+      /^["“]?([^"”]+)["”]?\s*@\s*(.+?):\s*(.+)$/s
+    );
+    if (m) {
+      const guess = m[1].trim();
+      const loc = m[2].trim();
+      const body = m[3].trim();
+      const pageMatch = loc.match(/Page\s*(\d+)/i);
+      const qMatch = loc.match(/Q(?:uestion)?\s*(\d+)/i);
+      items.push({
+        page: pageMatch ? `Page ${pageMatch[1]}` : loc.split(',')[0]?.trim() || 'Page ?',
+        question: qMatch ? `Q${qMatch[1]}` : '',
+        guess,
+        body: body || loc,
+      });
+      continue;
+    }
+
+    // Fallback: whole line as body
+    if (cleaned.length > 3) {
+      items.push({
+        page: 'Notes',
+        question: '',
+        guess: '',
+        body: cleaned,
+      });
+    }
+  }
+  return items;
+}
+
+/** Group uncertainties by page then question */
+function groupUncertainties(items: UncertaintyItem[]): {
+  page: string;
+  questions: { question: string; items: UncertaintyItem[] }[];
+}[] {
+  const pageMap = new Map<string, UncertaintyItem[]>();
+  for (const it of items) {
+    const key = it.page || 'Page ?';
+    if (!pageMap.has(key)) pageMap.set(key, []);
+    pageMap.get(key)!.push(it);
+  }
+  const out: {
+    page: string;
+    questions: { question: string; items: UncertaintyItem[] }[];
+  }[] = [];
+  for (const [page, list] of pageMap) {
+    const qMap = new Map<string, UncertaintyItem[]>();
+    for (const it of list) {
+      const q = it.question || 'General';
+      if (!qMap.has(q)) qMap.set(q, []);
+      qMap.get(q)!.push(it);
+    }
+    out.push({
+      page,
+      questions: Array.from(qMap.entries()).map(([question, items]) => ({
+        question,
+        items,
+      })),
+    });
+  }
+  // Sort Page 1, Page 2...
+  out.sort((a, b) => {
+    const na = parseInt(a.page.replace(/\D/g, ''), 10) || 0;
+    const nb = parseInt(b.page.replace(/\D/g, ''), 10) || 0;
+    return na - nb;
+  });
+  return out;
+}
+
+/** Best-effort extract text for one question from full transcript */
+function getQuestionTranscription(
+  q: EvaluationQuestion,
+  fullMain: string
+): string {
+  const perQ =
+    (q as any).studentAnswer ||
+    (q as any).answerSummary ||
+    (q as any).transcription ||
+    '';
+  if (perQ && String(perQ).trim()) return String(perQ).trim();
+
+  if (!fullMain) return '';
+
+  const num = String(q.questionNumber || '');
+  // Try patterns: "Q1", "Question 1", "1)", "1."
+  const patterns = [
+    new RegExp(
+      `(?:^|\\n)\\s*(?:Q\\s*${num}|Question\\s*${num}|${num}\\)|${num}\\.)([\\s\\S]*?)(?=(?:\\n\\s*(?:Q\\s*\\d+|Question\\s*\\d+|\\d+\\)|\\d+\\.))|$)`,
+      'i'
+    ),
+  ];
+  for (const re of patterns) {
+    const m = fullMain.match(re);
+    if (m && m[1] && m[1].trim().length > 10) {
+      return m[1].trim();
+    }
+  }
+  // Fallback: show full transcript with note
+  return fullMain;
 }
 
 function normalizeQuestion(q: any, index: number): EvaluationQuestion {
@@ -78,7 +236,6 @@ function buildJustification(q: EvaluationQuestion): {
   const gained: string[] = [];
   const lost: string[] = [];
 
-  // 1) Prefer explicit AI point lists
   const mg = (q as any).marksGained as string[] | undefined;
   const ml = (q as any).marksLost as string[] | undefined;
   if (Array.isArray(mg)) {
@@ -88,16 +245,13 @@ function buildJustification(q: EvaluationQuestion): {
     for (const g of ml) if (g?.trim()) lost.push(g.trim());
   }
 
-  // 2) Criteria breakdown
   if (q.criteriaScores?.length) {
     for (const cs of q.criteriaScores) {
       if (cs.max <= 0) continue;
       if (cs.awarded >= cs.max) {
         gained.push(`Full marks: “${cs.criterion}” (${cs.awarded}/${cs.max})`);
       } else if (cs.awarded > 0) {
-        gained.push(
-          `Partial: “${cs.criterion}” (${cs.awarded}/${cs.max})`
-        );
+        gained.push(`Partial: “${cs.criterion}” (${cs.awarded}/${cs.max})`);
         lost.push(
           `Lost ${cs.max - cs.awarded} on “${cs.criterion}” (${cs.awarded}/${cs.max})`
         );
@@ -107,7 +261,6 @@ function buildJustification(q: EvaluationQuestion): {
     }
   }
 
-  // 3) Fallback only if nothing specific
   const awarded = q.totalAwarded ?? 0;
   const max = q.maxMarks || 0;
   if (!gained.length && !lost.length) {
@@ -163,7 +316,7 @@ export default function ReviewInterfacePage() {
   const [saving, setSaving] = useState(false);
   const [publishing, setPublishing] = useState(false);
   const [publishModal, setPublishModal] = useState(false);
-  const [showTranscription, setShowTranscription] = useState(false);
+  const [showTranscription, setShowTranscription] = useState(true);
   const [loading, setLoading] = useState(true);
   const rightPanelRef = useRef<HTMLDivElement>(null);
 
@@ -229,6 +382,16 @@ export default function ReviewInterfacePage() {
 
   const pages = submission?.pages ?? [];
 
+  const { main: mainTranscription, uncertaintyBlock } = useMemo(
+    () => splitTranscription(evaluation?.transcription || ''),
+    [evaluation?.transcription]
+  );
+
+  const uncertaintyGrouped = useMemo(
+    () => groupUncertainties(parseUncertaintyNotes(uncertaintyBlock)),
+    [uncertaintyBlock]
+  );
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full py-32">
@@ -246,7 +409,11 @@ export default function ReviewInterfacePage() {
         <p className="text-slate-600 text-sm">Evaluation not found.</p>
         <p className="text-xs text-slate-400 font-mono">ID: {evalId || '—'}</p>
         <div className="flex gap-2">
-          <Button size="sm" variant="secondary" onClick={() => reloadCloudData?.()}>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => reloadCloudData?.()}
+          >
             Reload from cloud
           </Button>
           <Button size="sm" onClick={() => navigate('f-reviews')}>
@@ -354,6 +521,10 @@ export default function ReviewInterfacePage() {
     ? buildJustification(currentQuestion)
     : null;
 
+  const qTranscription = currentQuestion
+    ? getQuestionTranscription(currentQuestion, mainTranscription)
+    : '';
+
   return (
     <div className="h-screen flex flex-col bg-slate-100 overflow-hidden">
       <header className="h-14 bg-white border-b border-slate-200 flex items-center px-4 gap-3 shrink-0 z-10">
@@ -406,6 +577,7 @@ export default function ReviewInterfacePage() {
       </header>
 
       <div className="flex-1 flex overflow-hidden">
+        {/* Left: image + structured uncertainty */}
         <div
           className="flex flex-col bg-slate-800 border-r border-slate-700"
           style={{ width: '45%', minWidth: 320 }}
@@ -482,14 +654,59 @@ export default function ReviewInterfacePage() {
             )}
           </div>
 
+          {/* Structured AI uncertainty notes */}
           {showTranscription && (
-            <div className="border-t border-slate-700 p-3 max-h-48 overflow-y-auto">
-              <p className="text-xs text-slate-400 font-medium mb-2">
-                AI Transcription
-              </p>
-              <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">
-                {evaluation.transcription || '—'}
-              </p>
+            <div className="border-t border-slate-700 p-3 max-h-64 overflow-y-auto">
+              {uncertaintyGrouped.length > 0 ? (
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold text-amber-400 uppercase tracking-wide">
+                    AI uncertainty notes
+                  </p>
+                  {uncertaintyGrouped.map((pg) => (
+                    <div key={pg.page}>
+                      <p className="text-xs font-bold text-white mb-1.5">
+                        {pg.page}
+                      </p>
+                      {pg.questions.map((qg) => (
+                        <div key={qg.question} className="mb-2 ml-1">
+                          {qg.question && qg.question !== 'General' && (
+                            <p className="text-[11px] font-semibold text-sky-300 mb-1">
+                              {qg.question}
+                            </p>
+                          )}
+                          <ul className="space-y-1.5">
+                            {qg.items.map((it, idx) => (
+                              <li
+                                key={idx}
+                                className="text-[11px] text-slate-300 leading-relaxed pl-2 border-l-2 border-amber-500/50"
+                              >
+                                {it.guess && (
+                                  <span className="font-mono text-amber-200">
+                                    “{it.guess}”
+                                  </span>
+                                )}
+                                {it.guess && it.body ? ' — ' : ''}
+                                <span className="text-slate-400">{it.body}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  ))}
+                </div>
+              ) : mainTranscription ? (
+                <div>
+                  <p className="text-xs text-slate-400 font-medium mb-2">
+                    AI Transcription
+                  </p>
+                  <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">
+                    {mainTranscription}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500">No transcription notes</p>
+              )}
             </div>
           )}
 
@@ -515,6 +732,7 @@ export default function ReviewInterfacePage() {
           </div>
         </div>
 
+        {/* Right panel */}
         <div className="flex-1 flex flex-col overflow-hidden">
           <div className="flex items-center gap-1 px-4 py-2 bg-white border-b border-slate-200 overflow-x-auto shrink-0">
             {evaluation.questions.map((q, i) => {
@@ -592,6 +810,17 @@ export default function ReviewInterfacePage() {
                     <p className="text-xs text-slate-400">AI score</p>
                   </div>
                 </div>
+
+                {/* Feature 1: AI transcription for this Q — before Justification */}
+                <Card className="border-slate-200 bg-slate-50/80">
+                  <h3 className="text-sm font-semibold text-slate-900 mb-2">
+                    Q{currentQuestion.questionNumber} — AI transcription
+                  </h3>
+                  <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">
+                    {qTranscription ||
+                      'No transcription segment available for this question.'}
+                  </p>
+                </Card>
 
                 <Card className="border-slate-200">
                   <h3 className="text-sm font-semibold text-slate-900 mb-3">
