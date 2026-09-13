@@ -209,9 +209,8 @@ export default function SubmitExamPage() {
 
       await submitExam(submission);
 
-      setTimeout(() => {
-        processEvaluation(submission.id);
-      }, 400);
+      // No setTimeout — pass object so AI never races
+      processEvaluation(submission.id, submission);
 
       setStep('submitted');
       setConfirmModal(false);

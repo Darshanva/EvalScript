@@ -16,79 +16,80 @@ export async function ensureProfile(authUser: {
   email?: string | null;
   user_metadata?: Record<string, any>;
 }): Promise<User | null> {
-  const meta = authUser.user_metadata || {};
-  const email = authUser.email || meta.email || '';
+  try {
+    const meta = authUser.user_metadata || {};
+    const email = authUser.email || meta.email || '';
 
-  const { data: existing } = await supabase
-    .from('profiles')
-    .select('*')
-    .eq('id', authUser.id)
-    .maybeSingle();
+    const { data: existing, error: selErr } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('id', authUser.id)
+      .maybeSingle();
 
-  if (existing) {
-    return mapProfile(existing);
-  }
+    if (selErr) {
+      console.warn('ensureProfile select', selErr.message);
+    }
 
-  const name =
-    meta.name || meta.full_name || email.split('@')[0] || 'User';
-  const role = (meta.role as User['role']) || 'student';
-  const row = {
-    id: authUser.id,
-    email,
-    name,
-    role,
-    avatar_initials: name.slice(0, 2).toUpperCase(),
-    student_id: meta.studentId || meta.student_id || null,
-    faculty_id: meta.facultyId || meta.faculty_id || null,
-    department: meta.department || null,
-    calibrated: false,
-    client: meta.client || null,
-    organisation: meta.organisation || null,
-    batch: meta.batch || null,
-    term: meta.term || null,
-    section: meta.section || null,
-  };
+    if (existing) {
+      return mapProfile(existing);
+    }
 
-  const { data, error } = await supabase
-    .from('profiles')
-    .upsert(row, { onConflict: 'id' })
-    .select()
-    .single();
-
-  if (error) {
-    console.error('ensureProfile', error);
-    return {
+    const name =
+      meta.name || meta.full_name || email.split('@')[0] || 'User';
+    const role = (meta.role as User['role']) || 'student';
+    const row = {
       id: authUser.id,
       email,
       name,
       role,
-      avatarInitials: name.slice(0, 2).toUpperCase(),
+      avatar_initials: name.slice(0, 2).toUpperCase(),
+      student_id: meta.studentId || meta.student_id || null,
+      faculty_id: meta.facultyId || meta.faculty_id || null,
+      department: meta.department || null,
       calibrated: false,
-      createdAt: new Date().toISOString(),
+      client: meta.client || null,
+      organisation: meta.organisation || null,
+      batch: meta.batch || null,
+      term: meta.term || null,
+      section: meta.section || null,
     };
-  }
-  return mapProfile(data);
-}
 
-function mapProfile(row: any): User {
-  return {
-    id: row.id,
-    email: row.email,
-    name: row.name,
-    role: row.role,
-    avatarInitials:
-      row.avatar_initials || row.name?.slice(0, 2).toUpperCase() || 'U',
-    studentId: row.student_id,
-    facultyId: row.faculty_id,
-    department: row.department,
-    calibrated: !!row.calibrated,
-    createdAt: row.created_at,
-    client: row.client || undefined,
-    organisation: row.organisation || undefined,
-    batch: row.batch || undefined,
-    term: row.term || undefined,
-    section: row.section || undefined,
-  };
+    const { data, error } = await supabase
+      .from('profiles')
+      .upsert(row, { onConflict: 'id' })
+      .select()
+      .maybeSingle();
+
+    if (error) {
+      console.warn('ensureProfile upsert', error.message);
+      return {
+        id: authUser.id,
+        email,
+        name,
+        role,
+        avatarInitials: name.slice(0, 2).toUpperCase(),
+        calibrated: false,
+        createdAt: new Date().toISOString(),
+      };
+    }
+
+    if (!data) {
+      return {
+        id: authUser.id,
+        email,
+        name,
+        role,
+        avatarInitials: name.slice(0, 2).toUpperCase(),
+        calibrated: false,
+        createdAt: new Date().toISOString(),
+      };
+    }
+
+    return mapProfile(data);
+  } catch (e) {
+    console.warn('ensureProfile exception', e);
+    return null;
+  }
 }
 
 /* ───────────── Submissions ───────────── */

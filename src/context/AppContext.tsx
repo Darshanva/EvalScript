@@ -211,7 +211,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
     }
     case 'UPDATE_RUBRIC':
       return {
-      ...state,
+        ...state,
         rubrics: state.rubrics.map((r) =>
           r.id === action.rubric.id ? action.rubric : r
         ),
@@ -309,7 +309,10 @@ interface AppContextValue {
   showToast: (message: string, type?: 'success' | 'error' | 'info') => void;
   clearToast: () => void;
   submitExam: (submission: Submission) => Promise<void>;
-  processEvaluation: (submissionId: string) => void;
+  processEvaluation: (
+    submissionId: string,
+    submissionOverride?: Submission
+  ) => void;
   updateEvaluation: (evaluation: Evaluation) => Promise<void>;
   publishEvaluation: (evaluationId: string, facultyNotes?: string) => Promise<void>;
   createExam: (exam: Exam) => Promise<void>;
@@ -363,7 +366,11 @@ async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
 
     let users: User[] = [];
     try {
-      const { data } = await supabase.from('profiles').select('*').order('name');
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .order('name');
+      if (error) console.warn('profiles load', error.message);
       users = (data || []).map(mapProfileRow);
     } catch (e) {
       console.warn('profiles load failed', e);
@@ -425,17 +432,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
         console.warn('claude config load', e);
       }
 
-      const {
-        data: { session },
-      } = await supabase.auth.getSession();
+      try {
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
 
-      if (session?.user && mounted) {
-        const profile = await ensureProfile(session.user);
-        if (profile) {
-          dispatch({ type: 'LOGIN_SUCCESS', user: profile as User });
-          await loadCloudData(dispatch);
+        if (session?.user && mounted) {
+          const profile = await ensureProfile(session.user);
+          if (profile) {
+            dispatch({ type: 'LOGIN_SUCCESS', user: profile as User });
+            await loadCloudData(dispatch);
+          }
         }
+      } catch (e) {
+        console.warn('init session', e);
       }
+
       if (mounted) dispatch({ type: 'SET_AUTH_LOADING', loading: false });
     }
 
@@ -487,7 +499,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const logout = useCallback(async () => {
-    await supabase.auth.signOut();
+    try {
+      await supabase.auth.signOut({ scope: 'local' });
+    } catch (e) {
+      console.warn('signOut', e);
+    }
     dispatch({ type: 'LOGOUT' });
     navigationRef.current?.('/');
   }, []);
@@ -522,13 +538,23 @@ export function AppProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-    const processEvaluation = useCallback(
-    (submissionId: string) => {
-      const submission = state.submissions.find((s) => s.id === submissionId);
+  const processEvaluation = useCallback(
+    (submissionId: string, submissionOverride?: Submission) => {
+      const submission =
+        submissionOverride ||
+        state.submissions.find((s) => s.id === submissionId);
+
       if (!submission) {
-        console.warn('processEvaluation: submission not found', submissionId);
+        console.warn(
+          'processEvaluation: submission not found',
+          submissionId
+        );
         return;
       }
+
+      // Keep state in sync (kills race)
+      dispatch({ type: 'ADD_SUBMISSION', submission });
+
       const exam = state.exams.find((e) => e.id === submission.examId);
       if (!exam) {
         dispatch({
@@ -539,41 +565,22 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // Prefer real multi-question rubric — NEVER prefer empty/auto if better exists
-      let rubric =
-        state.rubrics.find((r) => r.examId === submission.examId) ||
-        state.rubrics.find((r) => r.id === exam.rubricId);
-
-      // If multiple rubrics for exam, pick the one with MOST questions
       const examRubrics = state.rubrics.filter(
         (r) => r.examId === submission.examId || r.id === exam.rubricId
       );
-      if (examRubrics.length > 1) {
-        rubric = examRubrics.reduce((best, r) =>
-          (r.questions?.length || 0) > (best.questions?.length || 0) ? r : best
-        );
-      }
+      let rubric =
+        examRubrics.length > 0
+          ? examRubrics.reduce((best, r) =>
+              (r.questions?.length || 0) > (best.questions?.length || 0)
+                ? r
+                : best
+            )
+          : state.rubrics.find((r) => r.examId === submission.examId) ||
+            state.rubrics.find((r) => r.id === exam.rubricId);
 
       const rubricQCount = rubric?.questions?.length || 0;
-      const isWeakAuto =
-        !rubric ||
-        rubricQCount === 0 ||
-        (rubricQCount === 1 &&
-          (rubric.questions?.[0]?.questionText || '')
-            .toLowerCase()
-            .includes('overall'));
-
-      if (isWeakAuto) {
-        console.warn(
-          '[AI] Weak/auto rubric for exam',
-          exam.id,
-          exam.code,
-          '— faculty should attach Q1..Qn rubric. Using best available.'
-        );
-      }
 
       if (!rubric || rubricQCount === 0) {
-        // Last resort only — single overall (causes Q1/100 UI)
         rubric = {
           id: exam.rubricId || `rubric-auto-${exam.id}`,
           examId: exam.id,
@@ -601,18 +608,18 @@ export function AppProvider({ children }: { children: ReactNode }) {
 
       console.log(
         '[AI] Using rubric',
-        rubric.id,
+        rubric!.id,
         'questions=',
-        rubric.questions?.length,
-        rubric.questions?.map((q) => `${q.number}:${q.maxMarks}`).join(', ')
+        rubric!.questions?.length,
+        rubric!.questions?.map((q) => `${q.number}:${q.maxMarks}`).join(', ')
       );
 
       dispatch({
         type: 'UPDATE_SUBMISSION_STATUS',
-        submissionId,
+        submissionId: submission.id,
         status: 'PROCESSING',
       });
-      updateSubmissionStatus(submissionId, 'PROCESSING').catch(console.error);
+      updateSubmissionStatus(submission.id, 'PROCESSING').catch(console.error);
 
       const calibration = state.calibrations.find(
         (c) => c.studentId === submission.studentId
@@ -621,6 +628,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
         calibration?.imageUrl ||
         (calibration as any)?.imageUrls?.slow ||
         (calibration as any)?.imageUrls?.medium ||
+        (calibration as any)?.imageUrls?.fast ||
         undefined;
 
       const useClaude =
@@ -666,36 +674,29 @@ export function AppProvider({ children }: { children: ReactNode }) {
           dispatch({ type: 'ADD_EVALUATION', evaluation });
           dispatch({
             type: 'UPDATE_SUBMISSION_STATUS',
-            submissionId,
+            submissionId: submission.id,
             status: 'AI_COMPLETE',
           });
           dispatch({
             type: 'UPDATE_SUBMISSION_EVALUATION_ID',
-            submissionId,
+            submissionId: submission.id,
             evaluationId: evaluation.id,
           });
 
           const ok = await saveEvaluation(evaluation);
           await updateSubmissionStatus(
-            submissionId,
+            submission.id,
             'AI_COMPLETE',
             evaluation.id
           );
 
-          if (!ok) {
-            dispatch({
-              type: 'SHOW_TOAST',
-              message:
-                'AI done but cloud save failed — check evaluations table / RLS',
-              toastType: 'error',
-            });
-          } else {
-            dispatch({
-              type: 'SHOW_TOAST',
-              message: `AI complete: ${evaluation.studentName} ${evaluation.totalMarks}/${evaluation.maxMarks} (${evaluation.questions?.length || 0} Qs)`,
-              toastType: 'success',
-            });
-          }
+          dispatch({
+            type: 'SHOW_TOAST',
+            message: ok
+              ? `AI complete: ${evaluation.studentName} ${evaluation.totalMarks}/${evaluation.maxMarks} (${evaluation.questions?.length || 0} Qs)`
+              : 'AI done but cloud save failed — check evaluations RLS',
+            toastType: ok ? 'success' : 'error',
+          });
 
           if (state.currentUser) {
             addAuditLog({
@@ -705,17 +706,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
               action: 'AI_EVALUATION_COMPLETE',
               entity: 'evaluation',
               entityId: evaluation.id,
-              details: `AI scored ${evaluation.totalMarks}/${evaluation.maxMarks} for ${evaluation.studentName} (${evaluation.questions?.length || 0} questions).`,
+              details: `AI scored ${evaluation.totalMarks}/${evaluation.maxMarks} (${evaluation.questions?.length || 0} questions).`,
             });
           }
         } catch (e: any) {
           console.error('processEvaluation failed', e);
           dispatch({
             type: 'UPDATE_SUBMISSION_STATUS',
-            submissionId,
+            submissionId: submission.id,
             status: 'SUBMITTED',
           });
-          updateSubmissionStatus(submissionId, 'SUBMITTED').catch(console.error);
+          updateSubmissionStatus(submission.id, 'SUBMITTED').catch(console.error);
           dispatch({
             type: 'SHOW_TOAST',
             message: e?.message || 'AI evaluation failed',
@@ -945,12 +946,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       );
     }
     return state.evaluations;
-  }, [
-    state.currentUser,
-    state.exams,
-    state.evaluations,
-    state.submissions,
-  ]);
+  }, [state.currentUser, state.exams, state.evaluations, state.submissions]);
 
   const getPendingReviewsForFaculty = useCallback((): Evaluation[] => {
     return getEvaluationsForCurrentUser().filter((e) =>
