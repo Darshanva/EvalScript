@@ -7,7 +7,6 @@ import {
   Badge,
   StatusBadge,
   ConfidenceBadge,
-  FlagBadge,
   Spinner,
   Modal,
   Textarea,
@@ -30,7 +29,6 @@ function pct(n: number, d: number) {
   return d > 0 ? Math.round((n / d) * 100) : 0;
 }
 
-/** Split full transcription vs uncertainty appendix */
 function splitTranscription(raw: string): {
   main: string;
   uncertaintyBlock: string;
@@ -58,30 +56,19 @@ function splitTranscription(raw: string): {
   };
 }
 
-/**
- * Parse lines like:
- * • "AOF" @ Page 1, Question 1, first bullet: Abbreviation written as 'AoF' – could be...
- * into { page, question, guess, body }
- */
 function parseUncertaintyNotes(block: string): UncertaintyItem[] {
   if (!block) return [];
   const items: UncertaintyItem[] = [];
-  // Support bullet • or - or *
   const lines = block
     .split(/\n+/)
     .map((l) => l.trim())
     .filter((l) => l && !l.startsWith('---'));
 
   for (const line of lines) {
-    // Skip "Resolved via calibration" header lines handled separately if needed
     if (/^---/.test(line) || /^Resolved via/i.test(line)) continue;
-
     const cleaned = line.replace(/^[•\-\*]\s*/, '');
 
-    // "guess" @ Page X, Question Y, ...: body
-    const m = cleaned.match(
-      /^["“]?([^"”]+)["”]?\s*@\s*(.+?):\s*(.+)$/s
-    );
+    const m = cleaned.match(/^["“]?([^"”]+)["”]?\s*@\s*(.+?):\s*(.+)$/s);
     if (m) {
       const guess = m[1].trim();
       const loc = m[2].trim();
@@ -89,7 +76,9 @@ function parseUncertaintyNotes(block: string): UncertaintyItem[] {
       const pageMatch = loc.match(/Page\s*(\d+)/i);
       const qMatch = loc.match(/Q(?:uestion)?\s*(\d+)/i);
       items.push({
-        page: pageMatch ? `Page ${pageMatch[1]}` : loc.split(',')[0]?.trim() || 'Page ?',
+        page: pageMatch
+          ? `Page ${pageMatch[1]}`
+          : loc.split(',')[0]?.trim() || 'Page ?',
         question: qMatch ? `Q${qMatch[1]}` : '',
         guess,
         body: body || loc,
@@ -97,20 +86,13 @@ function parseUncertaintyNotes(block: string): UncertaintyItem[] {
       continue;
     }
 
-    // Fallback: whole line as body
     if (cleaned.length > 3) {
-      items.push({
-        page: 'Notes',
-        question: '',
-        guess: '',
-        body: cleaned,
-      });
+      items.push({ page: 'Notes', question: '', guess: '', body: cleaned });
     }
   }
   return items;
 }
 
-/** Group uncertainties by page then question */
 function groupUncertainties(items: UncertaintyItem[]): {
   page: string;
   questions: { question: string; items: UncertaintyItem[] }[];
@@ -140,7 +122,6 @@ function groupUncertainties(items: UncertaintyItem[]): {
       })),
     });
   }
-  // Sort Page 1, Page 2...
   out.sort((a, b) => {
     const na = parseInt(a.page.replace(/\D/g, ''), 10) || 0;
     const nb = parseInt(b.page.replace(/\D/g, ''), 10) || 0;
@@ -149,36 +130,61 @@ function groupUncertainties(items: UncertaintyItem[]): {
   return out;
 }
 
-/** Best-effort extract text for one question from full transcript */
+/**
+ * ONLY this question’s text — never the full script.
+ * Uses per-Q fields from AI, then tries to slice full transcript by Q markers.
+ */
 function getQuestionTranscription(
   q: EvaluationQuestion,
   fullMain: string
 ): string {
-  const perQ =
-    (q as any).studentAnswer ||
-    (q as any).answerSummary ||
-    (q as any).transcription ||
-    '';
-  if (perQ && String(perQ).trim()) return String(perQ).trim();
+  const perQ = [
+    (q as any).studentAnswer,
+    (q as any).answerSummary,
+    (q as any).transcription,
+    (q as any).transcribedAnswer,
+  ]
+    .map((x) => (x != null ? String(x).trim() : ''))
+    .find((s) => s.length > 0);
+
+  if (perQ) return perQ;
 
   if (!fullMain) return '';
 
-  const num = String(q.questionNumber || '');
-  // Try patterns: "Q1", "Question 1", "1)", "1."
-  const patterns = [
-    new RegExp(
-      `(?:^|\\n)\\s*(?:Q\\s*${num}|Question\\s*${num}|${num}\\)|${num}\\.)([\\s\\S]*?)(?=(?:\\n\\s*(?:Q\\s*\\d+|Question\\s*\\d+|\\d+\\)|\\d+\\.))|$)`,
-      'i'
-    ),
-  ];
-  for (const re of patterns) {
-    const m = fullMain.match(re);
-    if (m && m[1] && m[1].trim().length > 10) {
-      return m[1].trim();
+  const num = String(q.questionNumber || '').trim();
+  if (!num) return '';
+
+  // Q1 / Question 1 / 1) / 1.
+  const re = new RegExp(
+    `(?:^|\\n)\\s*(?:Q\\s*${num}|Question\\s*${num}|${num}\\)|${num}\\.)\\s*([^]*?)(?=(?:\\n\\s*(?:Q\\s*\\d+|Question\\s*\\d+|\\d+\\)|\\d+\\.))|$)`,
+    'i'
+  );
+  const m = fullMain.match(re);
+  if (m && m[1] && m[1].trim().length > 15) {
+    return m[1].trim();
+  }
+
+  // Circled digits ①②③④⑤ often used in answers (map 1→① etc.)
+  const circled = ['①', '②', '③', '④', '⑤', '⑥', '⑦', '⑧', '⑨', '⑩'];
+  const idx = parseInt(num, 10) - 1;
+  if (idx >= 0 && idx < circled.length) {
+    const start = fullMain.indexOf(circled[idx]);
+    if (start >= 0) {
+      let end = fullMain.length;
+      for (let j = idx + 1; j < circled.length; j++) {
+        const p = fullMain.indexOf(circled[j], start + 1);
+        if (p >= 0) {
+          end = p;
+          break;
+        }
+      }
+      const slice = fullMain.slice(start, end).trim();
+      if (slice.length > 15) return slice;
     }
   }
-  // Fallback: show full transcript with note
-  return fullMain;
+
+  // Do NOT return fullMain — that causes “all text under every Q”
+  return '';
 }
 
 function normalizeQuestion(q: any, index: number): EvaluationQuestion {
@@ -577,7 +583,7 @@ export default function ReviewInterfacePage() {
       </header>
 
       <div className="flex-1 flex overflow-hidden">
-        {/* Left: image + structured uncertainty */}
+        {/* Left: image + FULL transcription + uncertainty */}
         <div
           className="flex flex-col bg-slate-800 border-r border-slate-700"
           style={{ width: '45%', minWidth: 320 }}
@@ -654,11 +660,24 @@ export default function ReviewInterfacePage() {
             )}
           </div>
 
-          {/* Structured AI uncertainty notes */}
+          {/* Feature 2: FULL AI transcription FIRST, then uncertainty notes */}
           {showTranscription && (
-            <div className="border-t border-slate-700 p-3 max-h-64 overflow-y-auto">
-              {uncertaintyGrouped.length > 0 ? (
-                <div className="space-y-3">
+            <div className="border-t border-slate-700 p-3 max-h-72 overflow-y-auto space-y-4">
+              {mainTranscription ? (
+                <div>
+                  <p className="text-xs font-semibold text-sky-300 uppercase tracking-wide mb-2">
+                    AI transcription (full)
+                  </p>
+                  <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">
+                    {mainTranscription}
+                  </p>
+                </div>
+              ) : (
+                <p className="text-xs text-slate-500">No full transcription</p>
+              )}
+
+              {uncertaintyGrouped.length > 0 && (
+                <div className="space-y-3 pt-2 border-t border-slate-600">
                   <p className="text-xs font-semibold text-amber-400 uppercase tracking-wide">
                     AI uncertainty notes
                   </p>
@@ -695,17 +714,6 @@ export default function ReviewInterfacePage() {
                     </div>
                   ))}
                 </div>
-              ) : mainTranscription ? (
-                <div>
-                  <p className="text-xs text-slate-400 font-medium mb-2">
-                    AI Transcription
-                  </p>
-                  <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">
-                    {mainTranscription}
-                  </p>
-                </div>
-              ) : (
-                <p className="text-xs text-slate-500">No transcription notes</p>
               )}
             </div>
           )}
@@ -811,15 +819,21 @@ export default function ReviewInterfacePage() {
                   </div>
                 </div>
 
-                {/* Feature 1: AI transcription for this Q — before Justification */}
+                {/* Feature 1: ONLY this question’s transcription */}
                 <Card className="border-slate-200 bg-slate-50/80">
                   <h3 className="text-sm font-semibold text-slate-900 mb-2">
                     Q{currentQuestion.questionNumber} — AI transcription
                   </h3>
-                  <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">
-                    {qTranscription ||
-                      'No transcription segment available for this question.'}
-                  </p>
+                  {qTranscription ? (
+                    <p className="text-sm text-slate-700 leading-relaxed whitespace-pre-wrap">
+                      {qTranscription}
+                    </p>
+                  ) : (
+                    <p className="text-sm text-slate-500 italic">
+                      No separate segment for this question. Full script is on
+                      the left under &ldquo;AI transcription (full)&rdquo;.
+                    </p>
+                  )}
                 </Card>
 
                 <Card className="border-slate-200">
