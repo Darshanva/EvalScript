@@ -136,6 +136,35 @@ function mapProfileRow(row: any): User {
   };
 }
 
+/** Build User from auth session when profiles row is missing/slow */
+function userFromSession(authUser: {
+  id: string;
+  email?: string | null;
+  user_metadata?: Record<string, any>;
+}): User {
+  const meta = authUser.user_metadata || {};
+  const email = authUser.email || meta.email || '';
+  const name =
+    meta.name || meta.full_name || email.split('@')[0] || 'User';
+  const role = (meta.role as User['role']) || 'student';
+  return {
+    id: authUser.id,
+    email,
+    name,
+    role,
+    avatarInitials: name.slice(0, 2).toUpperCase(),
+    studentId: meta.studentId || meta.student_id,
+    facultyId: meta.facultyId || meta.faculty_id,
+    department: meta.department,
+    calibrated: !!meta.calibrated,
+    client: meta.client,
+    organisation: meta.organisation,
+    batch: meta.batch,
+    term: meta.term,
+    section: meta.section,
+  };
+}
+
 function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'LOGIN_SUCCESS':
@@ -228,7 +257,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
     }
     case 'UPDATE_RUBRIC':
       return {
-        ...state,
+      ...state,
         rubrics: state.rubrics.map((r) =>
           r.id === action.rubric.id ? action.rubric : r
         ),
@@ -420,21 +449,50 @@ async function loadCloudData(dispatch: React.Dispatch<AppAction>) {
   }
 }
 
+/**
+ * Resolve logged-in user from session.
+ * NEVER return null if session.user exists — prevents refresh → login bounce.
+ */
+async function resolveUserFromSession(authUser: {
+  id: string;
+  email?: string | null;
+  user_metadata?: Record<string, any>;
+}): Promise<User> {
+  try {
+    const profile = await ensureProfile(authUser);
+    if (profile) return profile as User;
+  } catch (e) {
+    console.warn('ensureProfile failed, using session fallback', e);
+  }
+  return userFromSession(authUser);
+}
+
 export function AppProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(appReducer, initialState);
 
   useEffect(() => {
     let mounted = true;
+    let finishedInit = false;
+
+    function finishLoading() {
+      if (mounted && !finishedInit) {
+        finishedInit = true;
+        dispatch({ type: 'SET_AUTH_LOADING', loading: false });
+      }
+    }
 
     async function init() {
       dispatch({ type: 'SET_AUTH_LOADING', loading: true });
 
-      try {
-        const claudeCfg = await loadClaudeConfigFromCloud();
-        if (
-          mounted &&
-          (claudeCfg.claudeApiKey || claudeCfg.claudeModel || claudeCfg.aiMode)
-        ) {
+      // Claude config — non-blocking
+      loadClaudeConfigFromCloud()
+        .then((claudeCfg) => {
+          if (
+            !mounted ||
+            !(claudeCfg.claudeApiKey || claudeCfg.claudeModel || claudeCfg.aiMode)
+          ) {
+            return;
+          }
           dispatch({
             type: 'UPDATE_SYSTEM_SETTINGS',
             settings: {
@@ -444,28 +502,32 @@ export function AppProvider({ children }: { children: ReactNode }) {
               aiMode: (claudeCfg.aiMode as any) || 'claude',
             } as SystemSettings,
           });
-        }
-      } catch (e) {
-        console.warn('claude config load', e);
-      }
+        })
+        .catch((e) => console.warn('claude config load', e));
 
       try {
         const {
           data: { session },
+          error: sessionError,
         } = await supabase.auth.getSession();
 
+        if (sessionError) {
+          console.warn('getSession error', sessionError.message);
+        }
+
         if (session?.user && mounted) {
-          const profile = await ensureProfile(session.user);
-          if (profile) {
-            dispatch({ type: 'LOGIN_SUCCESS', user: profile as User });
-            await loadCloudData(dispatch);
+          const user = await resolveUserFromSession(session.user);
+          if (mounted) {
+            dispatch({ type: 'LOGIN_SUCCESS', user });
+            // Cloud data after user is set — page stays (user already set)
+            loadCloudData(dispatch).catch(console.error);
           }
         }
       } catch (e) {
         console.warn('init session', e);
+      } finally {
+        finishLoading();
       }
-
-      if (mounted) dispatch({ type: 'SET_AUTH_LOADING', loading: false });
     }
 
     init();
@@ -473,15 +535,38 @@ export function AppProvider({ children }: { children: ReactNode }) {
     const {
       data: { subscription },
     } = supabase.auth.onAuthStateChange(async (event, session) => {
-      if (event === 'SIGNED_IN' && session?.user) {
-        const profile = await ensureProfile(session.user);
-        if (profile) {
-          dispatch({ type: 'LOGIN_SUCCESS', user: profile as User });
-          await loadCloudData(dispatch);
-        }
-      }
+      console.log('[auth]', event, session?.user?.id?.slice(0, 8));
+
       if (event === 'SIGNED_OUT') {
-        dispatch({ type: 'LOGOUT' });
+        if (mounted) dispatch({ type: 'LOGOUT' });
+        return;
+      }
+
+      // Keep user on refresh / token refresh / tab focus
+      if (
+        (event === 'SIGNED_IN' ||
+          event === 'TOKEN_REFRESHED' ||
+          event === 'INITIAL_SESSION' ||
+          event === 'USER_UPDATED') &&
+        session?.user
+      ) {
+        try {
+          const user = await resolveUserFromSession(session.user);
+          if (mounted) {
+            dispatch({ type: 'LOGIN_SUCCESS', user });
+            if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION') {
+              loadCloudData(dispatch).catch(console.error);
+            }
+          }
+        } catch (e) {
+          console.warn('onAuthStateChange profile', e);
+          if (mounted && session.user) {
+            dispatch({
+              type: 'LOGIN_SUCCESS',
+              user: userFromSession(session.user),
+            });
+          }
+        }
       }
     });
 
@@ -566,13 +651,11 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // ── 1) Already running this submission? ──
       if (aiInFlight.has(submission.id)) {
         console.log('[AI] skip — already in progress', submission.id);
         return;
       }
 
-      // ── 2) Already have a finished evaluation for this submission? ──
       const existingEval = state.evaluations.find(
         (e) => e.submissionId === submission.id
       );
@@ -589,17 +672,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
         return;
       }
 
-      // ── 3) Submission already past SUBMITTED? ──
       const subStatus = (submission.status || '').toUpperCase();
       if (BLOCK_SUB_STATUSES.has(subStatus) && existingEval) {
         console.log('[AI] skip — submission status', subStatus, submission.id);
         return;
       }
-      // PROCESSING without eval row = crashed mid-run → allow retry
       if (subStatus === 'PROCESSING' && !existingEval) {
         console.log('[AI] retry — stuck PROCESSING without eval', submission.id);
       } else if (BLOCK_SUB_STATUSES.has(subStatus) && !existingEval) {
-        // AI_COMPLETE on sub but eval missing from state — still skip re-score
         if (subStatus !== 'PROCESSING') {
           console.log('[AI] skip — status', subStatus, 'no local eval');
           return;
