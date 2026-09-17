@@ -37,6 +37,8 @@ export default function PendingReviewsPage() {
   const { currentUser, exams, evaluations: allEvals } = state;
   const [tab, setTab] = useState<TabKey>('needs');
   const [busy, setBusy] = useState(false);
+  const [search, setSearch] = useState('');
+  const [examFilter, setExamFilter] = useState(''); // '' = all exams
 
   useEffect(() => {
     reloadCloudData?.();
@@ -69,7 +71,6 @@ export default function PendingReviewsPage() {
     allEvals.forEach((e) => {
       if (myExamIds.has(e.examId) || myExamIds.size === 0) map.set(e.id, e);
     });
-    // also match by submission belonging to my subs
     const subIds = new Set(mySubs.map((s) => s.id));
     allEvals.forEach((e) => {
       if (e.submissionId && subIds.has(e.submissionId)) map.set(e.id, e);
@@ -133,6 +134,63 @@ export default function PendingReviewsPage() {
     [myEvals]
   );
 
+  /** Exam options from current faculty data */
+  const examOptions = useMemo(() => {
+    const map = new Map<string, string>();
+    exams.forEach((e) => {
+      if (myExamIds.size === 0 || myExamIds.has(e.id)) {
+        map.set(e.id, `${e.title || e.code} (${e.code})`);
+      }
+    });
+    mySubs.forEach((s) => {
+      if (s.examId && !map.has(s.examId)) {
+        map.set(s.examId, s.examTitle || s.examCode || s.examId);
+      }
+    });
+    myEvals.forEach((e) => {
+      if (e.examId && !map.has(e.examId)) {
+        map.set(e.examId, e.examTitle || e.examCode || e.examId);
+      }
+    });
+    return Array.from(map.entries()).sort((a, b) =>
+      a[1].localeCompare(b[1])
+    );
+  }, [exams, myExamIds, mySubs, myEvals]);
+
+  const q = search.trim().toLowerCase();
+
+  const filteredInbox = useMemo(() => {
+    return inbox.filter((s) => {
+      if (examFilter && s.examId !== examFilter) return false;
+      if (q && !(s.studentName || '').toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [inbox, examFilter, q]);
+
+  const filteredNeeds = useMemo(() => {
+    return needsReview.filter((e) => {
+      if (examFilter && e.examId !== examFilter) return false;
+      if (q && !(e.studentName || '').toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [needsReview, examFilter, q]);
+
+  const filteredReviewed = useMemo(() => {
+    return reviewed.filter((e) => {
+      if (examFilter && e.examId !== examFilter) return false;
+      if (q && !(e.studentName || '').toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [reviewed, examFilter, q]);
+
+  const filteredPublished = useMemo(() => {
+    return published.filter((e) => {
+      if (examFilter && e.examId !== examFilter) return false;
+      if (q && !(e.studentName || '').toLowerCase().includes(q)) return false;
+      return true;
+    });
+  }, [published, examFilter, q]);
+
   function goReview(evaluationId: string) {
     sessionStorage.setItem('reviewEvalId', evaluationId);
     navigate('f-review', { selectedEvaluationId: evaluationId });
@@ -143,12 +201,12 @@ export default function PendingReviewsPage() {
     try {
       const targets = subId
         ? mySubs.filter((s) => s.id === subId)
-        : inbox;
+        : filteredInbox;
       if (!targets.length) {
         showToast('Nothing pending for AI', 'info');
         return;
       }
-      for (const s of targets) processEvaluation(s.id);
+      for (const s of targets) processEvaluation(s.id, s);
       showToast(`AI started on ${targets.length} submission(s)`, 'info');
       setTimeout(() => reloadCloudData?.(), 4000);
     } finally {
@@ -157,10 +215,10 @@ export default function PendingReviewsPage() {
   }
 
   const tabs: { key: TabKey; label: string; count: number }[] = [
-    { key: 'inbox', label: 'Inbox', count: inbox.length },
-    { key: 'needs', label: 'Needs Review', count: needsReview.length },
-    { key: 'reviewed', label: 'Reviewed', count: reviewed.length },
-    { key: 'published', label: 'Published', count: published.length },
+    { key: 'inbox', label: 'Inbox', count: filteredInbox.length },
+    { key: 'needs', label: 'Needs Review', count: filteredNeeds.length },
+    { key: 'reviewed', label: 'Reviewed', count: filteredReviewed.length },
+    { key: 'published', label: 'Published', count: filteredPublished.length },
   ];
 
   return (
@@ -182,13 +240,53 @@ export default function PendingReviewsPage() {
               size="sm"
               loading={busy}
               onClick={() => handleRunAi()}
-              disabled={inbox.length === 0}
+              disabled={filteredInbox.length === 0}
             >
               ⚡ Run AI on pending
             </Button>
           </div>
         }
       />
+
+      {/* Search + Exam filter */}
+      <div className="flex flex-col sm:flex-row gap-3 mb-5">
+        <div className="relative flex-1 min-w-0">
+          <span className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm pointer-events-none">
+            🔍
+          </span>
+          <input
+            type="search"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search student name…"
+            className="w-full h-10 pl-9 pr-3 rounded-lg border border-slate-200 bg-white text-sm text-slate-800 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-navy-500 focus:border-navy-500"
+          />
+        </div>
+        <select
+          value={examFilter}
+          onChange={(e) => setExamFilter(e.target.value)}
+          className="h-10 px-3 rounded-lg border border-slate-200 bg-white text-sm text-slate-800 focus:outline-none focus:ring-2 focus:ring-navy-500 min-w-[200px] sm:max-w-xs"
+        >
+          <option value="">All exams</option>
+          {examOptions.map(([id, label]) => (
+            <option key={id} value={id}>
+              {label}
+            </option>
+          ))}
+        </select>
+        {(search || examFilter) && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => {
+              setSearch('');
+              setExamFilter('');
+            }}
+          >
+            Clear
+          </Button>
+        )}
+      </div>
 
       <div className="flex flex-wrap gap-1 mb-6 border-b border-slate-200 pb-px">
         {tabs.map((t) => (
@@ -210,13 +308,19 @@ export default function PendingReviewsPage() {
 
       {tab === 'inbox' && (
         <div className="space-y-3">
-          {inbox.length === 0 ? (
+          {filteredInbox.length === 0 ? (
             <EmptyState
-              title="Inbox empty"
-              description="New submissions appear here until AI finishes."
+              title={
+                search || examFilter ? 'No matches' : 'Inbox empty'
+              }
+              description={
+                search || examFilter
+                  ? 'Try another name or exam filter.'
+                  : 'New submissions appear here until AI finishes.'
+              }
             />
           ) : (
-            inbox.map((sub) => (
+            filteredInbox.map((sub) => (
               <Card key={sub.id} className="flex items-center gap-4">
                 <div className="flex-1 min-w-0">
                   <p className="font-medium text-slate-900 truncate">
@@ -246,9 +350,15 @@ export default function PendingReviewsPage() {
 
       {tab === 'needs' && (
         <EvalList
-          list={needsReview}
-          emptyTitle="No evaluations waiting"
-          emptyDesc="After AI completes, scripts show here with marks."
+          list={filteredNeeds}
+          emptyTitle={
+            search || examFilter ? 'No matches' : 'No evaluations waiting'
+          }
+          emptyDesc={
+            search || examFilter
+              ? 'Try another name or exam filter.'
+              : 'After AI completes, scripts show here with marks.'
+          }
           mode="review"
           submissions={mySubs}
           onOpen={goReview}
@@ -256,9 +366,15 @@ export default function PendingReviewsPage() {
       )}
       {tab === 'reviewed' && (
         <EvalList
-          list={reviewed}
-          emptyTitle="Nothing reviewed yet"
-          emptyDesc="After Save Review, items appear here."
+          list={filteredReviewed}
+          emptyTitle={
+            search || examFilter ? 'No matches' : 'Nothing reviewed yet'
+          }
+          emptyDesc={
+            search || examFilter
+              ? 'Try another name or exam filter.'
+              : 'After Save Review, items appear here.'
+          }
           mode="view"
           submissions={mySubs}
           onOpen={goReview}
@@ -266,9 +382,15 @@ export default function PendingReviewsPage() {
       )}
       {tab === 'published' && (
         <EvalList
-          list={published}
-          emptyTitle="Nothing published"
-          emptyDesc="Published results appear here."
+          list={filteredPublished}
+          emptyTitle={
+            search || examFilter ? 'No matches' : 'Nothing published'
+          }
+          emptyDesc={
+            search || examFilter
+              ? 'Try another name or exam filter.'
+              : 'Published results appear here.'
+          }
           mode="view"
           submissions={mySubs}
           onOpen={goReview}
