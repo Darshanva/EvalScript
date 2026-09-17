@@ -5,6 +5,7 @@ import {
   Route,
   Navigate,
   useNavigate,
+  useLocation,
 } from 'react-router-dom';
 import { AppProvider, useApp } from './context/AppContext';
 import { AppLayout } from './components/Layout';
@@ -63,40 +64,12 @@ function AutoProcessor() {
     state.submissions.forEach((sub) => {
       if (sub.status === 'SUBMITTED' && !processed.current.has(sub.id)) {
         processed.current.add(sub.id);
-        processEvaluation(sub.id);
+        processEvaluation(sub.id, sub);
       }
     });
   }, [state.submissions, processEvaluation]);
 
   return null;
-}
-
-function ProtectedRoute({
-  children,
-  roles,
-}: {
-  children: React.ReactNode;
-  roles?: string[];
-}) {
-  const { state } = useApp();
-
-  if (state.authLoading) {
-    return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-50">
-        <Spinner size="lg" />
-      </div>
-    );
-  }
-
-  if (!state.currentUser) {
-    return <Navigate to="/login" replace />;
-  }
-
-  if (roles && !roles.includes(state.currentUser.role)) {
-    return <Navigate to="/" replace />;
-  }
-
-  return <>{children}</>;
 }
 
 function homeForRole(role?: string): string {
@@ -107,16 +80,61 @@ function homeForRole(role?: string): string {
   return '/';
 }
 
+function ProtectedRoute({
+  children,
+  roles,
+}: {
+  children: React.ReactNode;
+  roles?: string[];
+}) {
+  const { state } = useApp();
+  const location = useLocation();
+
+  // Wait for Supabase session restore — never bounce to login early
+  if (state.authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-slate-50">
+        <div className="flex flex-col items-center gap-3">
+          <Spinner size="lg" />
+          <p className="text-sm text-slate-500">Restoring session…</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!state.currentUser) {
+    try {
+      sessionStorage.setItem('auth_return_to', location.pathname + location.search);
+    } catch {
+      /* ignore */
+    }
+    return (
+      <Navigate
+        to="/login"
+        replace
+        state={{ from: location.pathname + location.search }}
+      />
+    );
+  }
+
+  if (roles && !roles.includes(state.currentUser.role)) {
+    return <Navigate to={homeForRole(state.currentUser.role)} replace />;
+  }
+
+  return <>{children}</>;
+}
+
 function AppRoutes() {
   const { state, clearToast } = useApp();
   const { currentUser, toast, authLoading } = state;
 
+  // Full-app gate while session is restoring
   if (authLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-slate-50">
         <div className="flex flex-col items-center gap-3">
           <Spinner size="lg" />
-          <p className="text-sm text-slate-500">Loading...</p>
+          <p className="text-sm text-slate-500">Loading…</p>
         </div>
       </div>
     );
@@ -136,15 +154,11 @@ function AppRoutes() {
         />
         <Route
           path="/login"
-          element={
-            !currentUser ? <AuthPage /> : <Navigate to={home} replace />
-          }
+          element={!currentUser ? <AuthPage /> : <Navigate to={home} replace />}
         />
         <Route
           path="/auth"
-          element={
-            !currentUser ? <AuthPage /> : <Navigate to={home} replace />
-          }
+          element={!currentUser ? <AuthPage /> : <Navigate to={home} replace />}
         />
 
         {/* Student */}
@@ -271,15 +285,15 @@ function AppRoutes() {
           }
         />
         <Route
-  path="/hod/faculty"
-  element={
-    <ProtectedRoute roles={['hod']}>
-      <AppLayout>
-        <HodFacultyPage />
-      </AppLayout>
-    </ProtectedRoute>
-  }
-/>
+          path="/hod/faculty"
+          element={
+            <ProtectedRoute roles={['hod']}>
+              <AppLayout>
+                <HodFacultyPage />
+              </AppLayout>
+            </ProtectedRoute>
+          }
+        />
         <Route
           path="/hod/students"
           element={

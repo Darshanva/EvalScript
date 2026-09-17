@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
 import { Button, Input, Card, Select } from '../components/ui';
 import { supabase } from '../lib/supabase';
@@ -6,7 +7,6 @@ import { loadExamTree } from '../lib/exam-tree';
 
 type Mode = 'login' | 'signup';
 
-/** All Organisation names under every Vertical (admin Exam Structure) */
 function collectOrganisations(tree: Record<string, any>): string[] {
   const set = new Set<string>();
   if (!tree || typeof tree !== 'object') return [];
@@ -21,9 +21,24 @@ function collectOrganisations(tree: Record<string, any>): string[] {
   return [...set].sort((a, b) => a.localeCompare(b));
 }
 
+function homeForRole(role?: string): string {
+  if (role === 'student') return '/student';
+  if (role === 'faculty') return '/faculty';
+  if (role === 'hod') return '/hod';
+  if (role === 'admin') return '/admin';
+  return '/';
+}
+
 export default function AuthPage() {
   const { setAuthUser, showToast, state } = useApp();
+  const navigate = useNavigate();
+  const location = useLocation();
   const preselectedRole = (state.navCtx?.role as string) || 'student';
+
+  const returnTo =
+    (location.state as { from?: string } | null)?.from ||
+    sessionStorage.getItem('auth_return_to') ||
+    '';
 
   const [mode, setMode] = useState<Mode>('login');
   const [email, setEmail] = useState('');
@@ -88,6 +103,18 @@ export default function AuthPage() {
     return user;
   }
 
+  function goAfterAuth(userRole: string) {
+    sessionStorage.removeItem('auth_return_to');
+    const dest =
+      returnTo &&
+      returnTo.startsWith('/') &&
+      returnTo !== '/login' &&
+      returnTo !== '/auth'
+        ? returnTo
+        : homeForRole(userRole);
+    navigate(dest, { replace: true });
+  }
+
   async function handleLogin(e: React.FormEvent) {
     e.preventDefault();
     setLoading(true);
@@ -103,9 +130,13 @@ export default function AuthPage() {
           .from('profiles')
           .select('*')
           .eq('id', data.user.id)
-          .single();
-        await mapAndSetUser(profile || { id: data.user.id, email }, email);
+          .maybeSingle();
+        const user = await mapAndSetUser(
+          profile || { id: data.user.id, email },
+          email
+        );
         showToast('Welcome back', 'success');
+        goAfterAuth(user.role);
       }
     } catch (err: any) {
       setError(err.message || 'Login failed');
@@ -158,15 +189,15 @@ export default function AuthPage() {
       };
 
       if (role === 'hod') {
-        // Scope = Organisation (also stored in client for existing HOD pages)
         profileRow.organisation = hodOrg;
         profileRow.client = hodOrg;
         profileRow.department = `HOD · ${hodOrg}`;
       }
 
       await supabase.from('profiles').upsert(profileRow);
-      await mapAndSetUser({ ...profileRow, id: data.user.id }, email);
+      const user = await mapAndSetUser({ ...profileRow, id: data.user.id }, email);
       showToast('Account created', 'success');
+      goAfterAuth(user.role);
     } catch (err: any) {
       setError(err.message || 'Registration failed');
     } finally {
@@ -176,11 +207,25 @@ export default function AuthPage() {
 
   return (
     <div className="min-h-screen bg-slate-50 flex flex-col">
-      <header className="px-6 py-4 flex items-center gap-2">
-        <div className="w-9 h-9 rounded-lg bg-navy-900 text-white font-bold flex items-center justify-center text-sm">
-          E
-        </div>
-        <span className="font-semibold text-slate-900">EvalScript</span>
+      <header className="px-6 py-4 flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => navigate('/')}
+          className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-800 transition-colors"
+        >
+          ← Back
+        </button>
+        <div className="h-5 w-px bg-slate-200" />
+        <button
+          type="button"
+          onClick={() => navigate('/')}
+          className="flex items-center gap-2"
+        >
+          <div className="w-9 h-9 rounded-lg bg-navy-900 text-white font-bold flex items-center justify-center text-sm">
+            E
+          </div>
+          <span className="font-semibold text-slate-900">EvalScript</span>
+        </button>
       </header>
 
       <div className="flex-1 flex items-center justify-center px-4 py-10">
