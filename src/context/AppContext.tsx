@@ -49,6 +49,23 @@ import { toPath } from '../lib/routes';
 import { navigationRef } from '../lib/navigation';
 import { loadClaudeConfigFromCloud } from '../lib/claude-client';
 
+/** In-flight AI jobs — prevents double run before first finishes */
+const aiInFlight = new Set<string>();
+
+const DONE_EVAL_STATUSES = new Set([
+  'AI_COMPLETE',
+  'FACULTY_REVIEW',
+  'REVIEWED',
+  'PUBLISHED',
+]);
+
+const BLOCK_SUB_STATUSES = new Set([
+  'PROCESSING',
+  'AI_COMPLETE',
+  'REVIEWED',
+  'PUBLISHED',
+]);
+
 interface AppState {
   currentUser: User | null;
   page: PageRoute;
@@ -545,14 +562,50 @@ export function AppProvider({ children }: { children: ReactNode }) {
         state.submissions.find((s) => s.id === submissionId);
 
       if (!submission) {
-        console.warn(
-          'processEvaluation: submission not found',
-          submissionId
+        console.warn('processEvaluation: submission not found', submissionId);
+        return;
+      }
+
+      // ── 1) Already running this submission? ──
+      if (aiInFlight.has(submission.id)) {
+        console.log('[AI] skip — already in progress', submission.id);
+        return;
+      }
+
+      // ── 2) Already have a finished evaluation for this submission? ──
+      const existingEval = state.evaluations.find(
+        (e) => e.submissionId === submission.id
+      );
+      if (
+        existingEval &&
+        DONE_EVAL_STATUSES.has((existingEval.status || '').toUpperCase())
+      ) {
+        console.log(
+          '[AI] skip — already evaluated',
+          submission.id,
+          existingEval.id,
+          existingEval.status
         );
         return;
       }
 
-      // Keep state in sync (kills race)
+      // ── 3) Submission already past SUBMITTED? ──
+      const subStatus = (submission.status || '').toUpperCase();
+      if (BLOCK_SUB_STATUSES.has(subStatus) && existingEval) {
+        console.log('[AI] skip — submission status', subStatus, submission.id);
+        return;
+      }
+      // PROCESSING without eval row = crashed mid-run → allow retry
+      if (subStatus === 'PROCESSING' && !existingEval) {
+        console.log('[AI] retry — stuck PROCESSING without eval', submission.id);
+      } else if (BLOCK_SUB_STATUSES.has(subStatus) && !existingEval) {
+        // AI_COMPLETE on sub but eval missing from state — still skip re-score
+        if (subStatus !== 'PROCESSING') {
+          console.log('[AI] skip — status', subStatus, 'no local eval');
+          return;
+        }
+      }
+
       dispatch({ type: 'ADD_SUBMISSION', submission });
 
       const exam = state.exams.find((e) => e.id === submission.examId);
@@ -613,6 +666,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
         rubric!.questions?.length,
         rubric!.questions?.map((q) => `${q.number}:${q.maxMarks}`).join(', ')
       );
+
+      aiInFlight.add(submission.id);
 
       dispatch({
         type: 'UPDATE_SUBMISSION_STATUS',
@@ -722,11 +777,14 @@ export function AppProvider({ children }: { children: ReactNode }) {
             message: e?.message || 'AI evaluation failed',
             toastType: 'error',
           });
+        } finally {
+          aiInFlight.delete(submission.id);
         }
       })();
     },
     [
       state.submissions,
+      state.evaluations,
       state.exams,
       state.rubrics,
       state.calibrations,
